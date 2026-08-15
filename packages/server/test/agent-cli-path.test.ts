@@ -226,7 +226,7 @@ describe("platform boot extends process.env.PATH (integration)", () => {
     }
   });
 
-  it("a platform-touching route boots the packaged platform, which extends the real process.env.PATH", async () => {
+  it("createTerminal boots the packaged platform, which extends the real process.env.PATH", async () => {
     // Fake a packaged layout on disk: <tmpAppDir>/bin/<launcher> plus a
     // node_modules/@prismshadow/penguin-server/dist/index.js path (need not exist —
     // findCliBinDir only parses the string) that process.argv[1] is made to point at,
@@ -256,8 +256,8 @@ describe("platform boot extends process.env.PATH (integration)", () => {
       const admin = await loginAdmin(t.app);
       const api = apiClient(t.app, admin.cookie);
       // Any platform-touching route triggers the lazy first boot (see hmr/host.ts).
-      const info = await api.get("/api/hmr/platform");
-      expect(info.status).toBe(200);
+      const created = await api.post("/api/hmr/terminals", { command: "true" });
+      expect(created.status).toBe(201);
 
       const pathNow = process.env[pathKeyUsed] ?? "";
       const entries = pathNow.split(path.delimiter);

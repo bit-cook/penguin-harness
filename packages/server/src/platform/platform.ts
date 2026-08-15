@@ -15,23 +15,32 @@
  * effects (e.g. extending process.env for the shells agents spawn) are
  * deliverable from boot() with no runtime change. See ../hmr/README.md.
  *
- * This packaged default is deliberately a bare stub: the runtime (HmrHost,
- * routes.ts) is mechanism only, and carries no business methods of its own.
- * A real business platform is pushed over HTTP and serves its own HTTP through
- * the seam in ../hmr/http-seam.ts: it sees every request before the runtime's
- * own routes do and answers null for the ones it does not own, so adding or
- * changing an endpoint needs no runtime change.
+ * Tree: platform { terminals: keyed(terminal) } — terminals are the
+ * live-state proof (their processes are runtime-owned and survive swaps).
+ *
+ * This is the business platform that lives on feat/workflow-hmr (the
+ * mechanism-only feat/hot-update-mvp packages a bare stub instead — see
+ * that branch's platform.ts). A new business API does not grow a route in
+ * the runtime: the platform serves its own HTTP through the seam in
+ * ../hmr/http-seam.ts, which offers it every request before the runtime's
+ * own routes see it. /terminals* is still wired in routes.ts as a legacy
+ * convenience for this one surface, and is due to move here.
  */
 import { resolveRoot } from "@prismshadow/penguin-core";
-import type { Impl, Json, Park } from "@prismshadow/penguin-core/kernel";
-import { defineIface, schema, type } from "@prismshadow/penguin-core/kernel";
+import type { Impl, Json, KeyedHandle, Park } from "@prismshadow/penguin-core/kernel";
+import { defineIface, keyed, schema, type } from "@prismshadow/penguin-core/kernel";
 import { ensureCliOnPath } from "./agent-cli-path.js";
 import { machinesHttp } from "./machines/http.js";
 import { machinesProxy } from "./machines/proxy.js";
 import { MachinesService } from "./machines/service.js";
+import type { TerminalApi } from "./terminal.js";
+import { TerminalIface, terminalImpl } from "./terminal.js";
+import { spawnShellResource } from "../hmr/resources.js";
 
 export interface PlatformApi extends Park {
   info(): Json;
+  createTerminal(command: string, cwd: string): Promise<{ id: string }>;
+  terminals(): KeyedHandle<TerminalApi>;
 }
 
 export type PlatformCtx = { motd: string };
@@ -40,11 +49,13 @@ export const PlatformIface = defineIface<PlatformApi, PlatformCtx>({
   name: "platform",
   version: 1,
   context: schema<PlatformCtx>(type({ motd: "string" })),
-  methods: ["park", "info"],
+  methods: ["park", "info", "createTerminal", "terminals"],
+  children: { terminals: keyed(TerminalIface) },
 });
 
 export const platformImpl: Impl<PlatformApi, PlatformCtx> = {
-  create(_ctx, context) {
+  children: { terminals: terminalImpl },
+  create(ctx, context, children) {
     // "What PATH does the agent's shell see" is policy (see ../hmr/README.md), not
     // mechanism: it belongs here, in-process at platform boot, rather than in the
     // Electron shell that forks the server — that's what makes the fix reach
@@ -64,6 +75,7 @@ export const platformImpl: Impl<PlatformApi, PlatformCtx> = {
     });
     // `/server/<id>/api/…` — the same-origin proxy onto a connected machine's tunnel.
     const serverProxy = machinesProxy((id) => machines.tunnelPortFor(id));
+    const terminals = children.terminals as KeyedHandle<TerminalApi>;
     // `http` rides beside the iface methods (not IN them: a Request/Response pair is not
     // Json) — the seam calls it in-process on the booted object. See ../hmr/http-seam.ts.
     return {
@@ -74,7 +86,17 @@ export const platformImpl: Impl<PlatformApi, PlatformCtx> = {
         impl: "packaged",
         ifaceVersion: PlatformIface.version,
         motd: context.motd,
+        terminals: terminals.keys(),
       }),
+      async createTerminal(command, cwd) {
+        const id = `term_${Math.random().toString(36).slice(2, 10)}`;
+        // Spawn the live resource on the runtime side first; the node only
+        // carries its handle id (linear state).
+        spawnShellResource(ctx.resources, `proc_${id}`, command, cwd);
+        await terminals.add(id, { procId: `proc_${id}`, command, cwd });
+        return { id };
+      },
+      terminals: () => terminals,
     };
   },
 };
