@@ -1,10 +1,10 @@
 ---
 name: penguin-sdk
-description: Build AI apps on the Penguin Harness SDK — self-contained projects, the createSession/run streaming loop with thinking and image messages, and a complete RAG recipe that ingests documents into a knowledge base and answers with citations behind a web UI.
+description: Build AI apps on the Penguin Harness SDK — self-contained projects, the createSession/run streaming loop with thinking and image messages, a complete RAG recipe that ingests documents into a knowledge base and answers with citations behind a web UI, and integration into the running harness through the HMR API (fixed workflows, workspace tools and skills, embedded UI).
 short_description: Build AI and RAG apps on the Penguin Harness SDK.
 short_description_zh: 基于 Penguin SDK 构建 AI 与 RAG 应用。
-version: 19
-updated: 2026-08-06T00:00:00Z
+version: 20
+updated: 2026-08-15T00:00:00Z
 ---
 
 # Penguin Harness SDK
@@ -355,3 +355,70 @@ Never declare the app done without running it:
 5. Open the UI (or screenshot it) to confirm the layout renders.
 
 Fix any failure and re-verify; when the app accepts image input, one verification question must include a real image. Report with backtick-wrapped relative paths (`server.ts`, `public/index.html`, …), how to start the app, and the assumptions you made.
+
+## Integrating with the running harness (HMR)
+
+Everything above builds an app that runs **beside** PenguinHarness — its own process, its own data root. When a capability must live **inside** the running system — show up in its UI, extend its workspace, drive its agents — integrate through the harness's HMR API instead of restarting or rebuilding the system. Two rules decide what goes where:
+
+1. **Most functionality does not load through HMR.** Business logic, retrieval, storage, calls to external services — all of that stays in your app or a normal module, built and verified as described above. An HMR-loaded unit is a thin integration seam; when one starts accumulating real logic, move the logic out into app code or a skill and keep the unit thin.
+2. **HMR owns exactly the integration surface**: the agent's fixed **workflow** (its `userInput → runAgent` unit), extra **workspace capabilities** (CLI-callable tools, skills), **calls to other agents**, and **UI embedded into the system UI**.
+
+You are the authoring loop: you write the unit, the platform's validator judges it (a 400 response tells you exactly what is wrong), you fix and retry. Never try to weaken or bypass the validator — conform to it.
+
+### Credential
+
+The server publishes a per-boot local-agent credential at `$PENGUIN_HOME/hmr/api.json` (fallback `~/.penguin/hmr/api.json`), containing `{ "url": "http://127.0.0.1:<port>", "token": "<hex>" }`. It is regenerated on every server boot.
+
+```bash
+HMR_FILE="${PENGUIN_HOME:-$HOME/.penguin}/hmr/api.json"
+[ -r "$HMR_FILE" ] && echo ok || echo missing
+HMR_URL=$(python3 -c "import json;print(json.load(open('$HMR_FILE'))['url'])")
+HMR_TOKEN=$(python3 -c "import json;print(json.load(open('$HMR_FILE'))['token'])")
+```
+
+If the file is missing, the server is not running (or you are not on the server machine): say so to the user and stop — do not guess tokens. The HMR APIs are loopback-only by default (403 on exposed binds without HTTPS).
+
+### The workflow contract
+
+A workflow script is the BODY of a strict-mode JavaScript function receiving one argument named `context` (`context.state` is your previously parked state, or null on first install). It must RETURN an object:
+
+- `name`: non-empty string; `version`: number.
+- `run(input, ctx)` — the fixed workflow: receives the user input, drives agents through `ctx.runAgent(...)`, returns a JSON result. Keep it a few lines — complexity belongs in skills and app code, not in the workflow body.
+- `setup(ctx)` (optional) — register workspace integration points: `ctx.registerTool({ name, description, run })` for tools callable from the workspace and CLI; skill and UI registration go through the same context (the validator's 400 verdict names the exact accepted shape). Registrations are effect-bound: unloading the workflow deregisters exactly what it added.
+- `park()` (optional) — return your serializable state; it rides across reloads and platform upgrades.
+
+No `import`/`require`/`await`. No code outside the function body. State discipline: anything worth keeping goes through `park()`/`context.state`; everything else is rebuilt on reload — never stash state in globals.
+
+### Install, verify, iterate
+
+Write the script to a file, JSON-encode it, and install:
+
+```bash
+cat > /tmp/workflow.js <<'SCRIPT'
+...your script...
+SCRIPT
+python3 - <<'PY' > /tmp/workflow.json
+import json
+print(json.dumps({"id": "my-workflow", "script": open("/tmp/workflow.js").read()}))
+PY
+curl -s -X POST -H "Authorization: Bearer $HMR_TOKEN" -H "content-type: application/json" \
+  -d @/tmp/workflow.json "$HMR_URL/api/hmr/workflows"
+```
+
+- `201` → installed; the response lists the registered integration points.
+- `400` → the validator rejected it; `error.message` is the exact verdict (parse error, missing contract field, duplicate tool name…). Fix the script and retry. Do not retry more than 3 times — after that, show the user the last script and the verdict.
+
+Always verify before reporting success — run the workflow (or invoke a registered tool) and check the result against a case you can compute yourself:
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $HMR_TOKEN" -H "content-type: application/json" \
+  -d '{"input": {}}' "$HMR_URL/api/hmr/workflows/my-workflow/run"
+```
+
+Then tell the user the workflow id, what it registered, and one example invocation.
+
+### Maintenance
+
+- `GET /api/hmr/workflows` — installed workflows and their registrations.
+- `POST /api/hmr/workflows/<id>/reload` body `{"script": "..."}` — hot-swap the code; the parked state rides across (this is how you upgrade a workflow without losing its data).
+- `DELETE /api/hmr/workflows/<id>` — unload; everything it registered deregisters automatically.
