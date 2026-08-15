@@ -3,7 +3,7 @@ name: penguin-sdk
 description: Build AI apps on the Penguin Harness SDK — self-contained projects, the createSession/run streaming loop with thinking and image messages, a complete RAG recipe that ingests documents into a knowledge base and answers with citations behind a web UI, and integration into the running harness through the HMR API (fixed workflows, workspace tools and skills, embedded UI).
 short_description: Build AI and RAG apps on the Penguin Harness SDK.
 short_description_zh: 基于 Penguin SDK 构建 AI 与 RAG 应用。
-version: 20
+version: 21
 updated: 2026-08-15T00:00:00Z
 ---
 
@@ -367,16 +367,18 @@ You are the authoring loop: you write the unit, the platform's validator judges 
 
 ### Credential
 
-The server publishes a per-boot local-agent credential at `$PENGUIN_HOME/hmr/api.json` (fallback `~/.penguin/hmr/api.json`), containing `{ "url": "http://127.0.0.1:<port>", "token": "<hex>" }`. It is regenerated on every server boot.
+Integrating into a running harness is an **operator action**, not something an agent does on its own authority: the HMR APIs require an **admin session** — the same credential a person uses from the browser — and are loopback-only by default (403 on exposed binds without HTTPS). There is deliberately no readable token on disk to pick up; the only way in is to authenticate as the admin. The person running you must supply the admin password (e.g. in `PENGUIN_ADMIN_PASSWORD`) and the harness's origin (`HMR_URL`); log in once and carry the session cookie:
 
 ```bash
-HMR_FILE="${PENGUIN_HOME:-$HOME/.penguin}/hmr/api.json"
-[ -r "$HMR_FILE" ] && echo ok || echo missing
-HMR_URL=$(python3 -c "import json;print(json.load(open('$HMR_FILE'))['url'])")
-HMR_TOKEN=$(python3 -c "import json;print(json.load(open('$HMR_FILE'))['token'])")
+: "${HMR_URL:?set HMR_URL to the running harness origin, e.g. http://localhost:7369}"
+: "${PENGUIN_ADMIN_PASSWORD:?set the admin password to authenticate}"
+HMR_COOKIE=$(curl -s -i -X POST -H "content-type: application/json" \
+  -d "{\"userId\":\"admin\",\"password\":\"$PENGUIN_ADMIN_PASSWORD\"}" \
+  "$HMR_URL/api/auth/login" | grep -i '^set-cookie:' | sed 's/^[Ss]et-[Cc]ookie: *//; s/;.*//')
+[ -n "$HMR_COOKIE" ] && echo ok || echo "admin login failed"
 ```
 
-If the file is missing, the server is not running (or you are not on the server machine): say so to the user and stop — do not guess tokens. The HMR APIs are loopback-only by default (403 on exposed binds without HTTPS).
+If you have no admin credential, say so to the user and stop — never try to read tokens off disk or guess one. (An agent that could self-modify the harness it runs inside would be a privilege-escalation hole, which is exactly why the on-disk token was removed.)
 
 ### The workflow contract
 
@@ -401,7 +403,7 @@ python3 - <<'PY' > /tmp/workflow.json
 import json
 print(json.dumps({"id": "my-workflow", "script": open("/tmp/workflow.js").read()}))
 PY
-curl -s -X POST -H "Authorization: Bearer $HMR_TOKEN" -H "content-type: application/json" \
+curl -s -X POST -H "cookie: $HMR_COOKIE" -H "content-type: application/json" \
   -d @/tmp/workflow.json "$HMR_URL/api/hmr/workflows"
 ```
 
@@ -411,7 +413,7 @@ curl -s -X POST -H "Authorization: Bearer $HMR_TOKEN" -H "content-type: applicat
 Always verify before reporting success — run the workflow (or invoke a registered tool) and check the result against a case you can compute yourself:
 
 ```bash
-curl -s -X POST -H "Authorization: Bearer $HMR_TOKEN" -H "content-type: application/json" \
+curl -s -X POST -H "cookie: $HMR_COOKIE" -H "content-type: application/json" \
   -d '{"input": {}}' "$HMR_URL/api/hmr/workflows/my-workflow/run"
 ```
 
