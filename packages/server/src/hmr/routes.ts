@@ -24,6 +24,7 @@ import type { AppDeps } from "../app.js";
 import { authMiddleware } from "../auth/middleware.js";
 import type { AppEnv } from "../auth/middleware.js";
 import { HttpError } from "../http/errors.js";
+import type { ShellProcResource } from "./resources.js";
 
 /** Bind addresses considered safe by default; anything else needs HTTPS. */
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
@@ -174,6 +175,66 @@ export function hmrRoutes(deps: AppDeps): Hono<AppEnv> {
     // status + the dropped/missing/invalid paths (input for the upper
     // upgrade-ladder rungs), so clients keep one parsing path.
     return c.json(outcome);
+  });
+
+
+  // -- Terminals: the live-state proof that a resource survives a platform swap.
+  // These are the last business routes left in the runtime. A NEW business API does
+  // not grow another one here — it is served by the platform itself through the HTTP
+  // seam (./http-seam.ts), and these are due to move there too.
+
+  routes.post("/terminals", async (c) => {
+    const body = await c.req.json<{ command?: string; cwd?: string }>();
+    const inst = await hmr.ensure();
+    const created = await inst.api.createTerminal(
+      body.command ?? "cat",
+      body.cwd ?? deps.config.root,
+    );
+    return c.json(created, 201);
+  });
+
+  routes.get("/terminals", async (c) => {
+    const inst = await hmr.ensure();
+    const terminals = inst.api.terminals();
+    return c.json({
+      terminals: terminals.keys().map((id) => {
+        const t = terminals.get(id)!;
+        return { id, alive: t.alive(), lost: t.lost() };
+      }),
+    });
+  });
+
+  routes.get("/terminals/:id", async (c) => {
+    const inst = await hmr.ensure();
+    const t = inst.api.terminals().get(c.req.param("id"));
+    if (t === undefined) throw new HttpError(404, "not_found", "No such terminal.");
+    return c.json({ output: t.read(), alive: t.alive(), lost: t.lost() });
+  });
+
+  routes.post("/terminals/:id/input", async (c) => {
+    const body = await c.req.json<{ data: string }>();
+    const inst = await hmr.ensure();
+    const t = inst.api.terminals().get(c.req.param("id"));
+    if (t === undefined) throw new HttpError(404, "not_found", "No such terminal.");
+    t.write(body.data);
+    return c.json({ ok: true });
+  });
+
+  routes.delete("/terminals/:id", async (c) => {
+    const id = c.req.param("id");
+    const inst = await hmr.ensure();
+    const terminals = inst.api.terminals();
+    const t = terminals.get(id);
+    if (t === undefined) throw new HttpError(404, "not_found", "No such terminal.");
+    // Closing a terminal is user intent to end the process: kill and release
+    // the runtime resource, then remove the node.
+    const procId = (t.park() as { procId?: string }).procId;
+    if (procId !== undefined) {
+      hmr.resources.claim<ShellProcResource>(procId)?.kill();
+      hmr.resources.release(procId);
+    }
+    terminals.remove(id);
+    return c.json({ ok: true });
   });
 
   return routes;
