@@ -22,6 +22,13 @@ import { DRAFT_SESSION_ID } from "../../features/chat/chat-page";
 import { parkActiveDraft } from "../../features/chat/draft-sessions";
 import { ChangePasswordDialog } from "../account/change-password-dialog";
 import { useDevTools } from "../../features/dev-console/dev-tools";
+import { Tabs } from "../ui/tabs";
+import {
+  retainedTab,
+  WORKFLOW_UI_UPDATED_EVENT,
+  workflowTabsFromResponse,
+} from "../../lib/workflow-tabs";
+import type { WorkflowTab } from "../../lib/workflow-tabs";
 
 /** "Last conversation" glyph (chat lines + resume arrow), used only by the rail. */
 const LAST_CHAT_ICON = "M8 10h8M8 14h5M21 12a9 9 0 1 1-4.2-7.6L21 4v5h-5";
@@ -180,6 +187,30 @@ export function AppLayout() {
   useDevTools();
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [changePasswordOpen, setChangePasswordOpen] = useState(false);
+  const [workflows, setWorkflows] = useState<WorkflowTab[]>([]);
+  const [activeTab, setActiveTab] = useState("chat");
+  useEffect(() => {
+    let cancelled = false;
+    const reload = async () => {
+      try {
+        const next = workflowTabsFromResponse(await api.getHmrWorkflows());
+        if (cancelled) return;
+        setWorkflows(next);
+        setActiveTab((active) => retainedTab(active, next));
+      } catch {
+        if (cancelled) return;
+        setWorkflows([]);
+        setActiveTab("chat");
+      }
+    };
+    const onUpdated = () => void reload();
+    void reload();
+    window.addEventListener(WORKFLOW_UI_UPDATED_EVENT, onUpdated);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(WORKFLOW_UI_UPDATED_EVENT, onUpdated);
+    };
+  }, []);
   // Initial-password banner dismissal: server-persisted per user (ui_prefs). null = prefs not
   // hydrated yet — the banner stays unrendered until the stored answer arrives, so an already
   // dismissed banner never flashes before disappearing. Hydration only runs when the banner
@@ -300,8 +331,30 @@ export function AppLayout() {
           </div>
         )}
 
-        <main className="min-h-0 flex-1 overflow-hidden">
-          <Outlet />
+        <main className="flex min-h-0 flex-1 flex-col overflow-hidden">
+          <div className="shrink-0 bg-white px-2 dark:bg-gray-950" aria-label={S.nav.workflowTabs}>
+            <Tabs
+              items={[
+                { key: "chat", label: S.nav.chat },
+                ...workflows.map((workflow) => ({ key: workflow.id, label: workflow.name })),
+              ]}
+              active={activeTab}
+              onChange={setActiveTab}
+            />
+          </div>
+          <div
+            className={`min-h-0 flex-1 overflow-hidden ${activeTab === "chat" ? "block" : "hidden"}`}
+          >
+            <Outlet />
+          </div>
+          {workflows.map((workflow) => (
+            <iframe
+              key={`${workflow.id}:${workflow.uiRev}`}
+              title={workflow.name}
+              src={`/workflow/${encodeURIComponent(workflow.id)}/?v=${encodeURIComponent(workflow.uiRev)}`}
+              className={`min-h-0 flex-1 border-0 bg-white dark:bg-gray-950 ${activeTab === workflow.id ? "block" : "hidden"}`}
+            />
+          ))}
         </main>
       </div>
 

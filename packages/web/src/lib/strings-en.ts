@@ -12,6 +12,7 @@ export const en: Strings = {
 
   nav: {
     chat: "Chat",
+    workflowTabs: "Workflow tabs",
     newChat: "New chat",
     agents: "Agents",
     skills: "Skills",

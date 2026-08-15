@@ -121,6 +121,8 @@ export const getPrefs = () => apiFetch<PrefsResponse>("/api/me/prefs");
 export const putPrefs = (prefs: UiPrefs) =>
   apiFetch<PrefsResponse>("/api/me/prefs", { method: "PUT", body: prefs });
 
+export const getHmrWorkflows = () => apiFetch<unknown>("/api/hmr/workflows");
+
 // Admin user management (admin only) -----------------------------------------------------
 
 export const adminListUsers = () => apiFetch<AdminUsersResponse>("/api/admin/users");

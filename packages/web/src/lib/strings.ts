@@ -14,6 +14,7 @@ export const zh = {
 
   nav: {
     chat: "对话",
+    workflowTabs: "Workflow 标签页",
     newChat: "新对话",
     agents: "智能体",
     skills: "技能库",
