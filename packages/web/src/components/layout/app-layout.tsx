@@ -351,7 +351,7 @@ export function AppLayout() {
             <iframe
               key={`${workflow.id}:${workflow.uiRev}`}
               title={workflow.name}
-              src={`/workflow/${encodeURIComponent(workflow.id)}/?v=${encodeURIComponent(workflow.uiRev)}`}
+              src={`/workflow/${encodeURIComponent(workflow.agentId)}/${encodeURIComponent(workflow.workflowId)}/?v=${encodeURIComponent(workflow.uiRev)}`}
               className={`min-h-0 flex-1 border-0 bg-white dark:bg-gray-950 ${activeTab === workflow.id ? "block" : "hidden"}`}
             />
           ))}

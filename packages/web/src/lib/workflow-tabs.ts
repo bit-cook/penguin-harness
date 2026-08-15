@@ -1,5 +1,7 @@
 export interface WorkflowTab {
   id: string;
+  agentId: string;
+  workflowId: string;
   name: string;
   uiRev: string;
 }
@@ -12,12 +14,28 @@ export function workflowTabsFromResponse(value: unknown): WorkflowTab[] {
   if (!Array.isArray(workflows)) return [];
   return workflows.flatMap((item) => {
     if (typeof item !== "object" || item === null) return [];
-    const row = item as { id?: unknown; name?: unknown; uiRev?: unknown };
+    const row = item as {
+      id?: unknown;
+      agentId?: unknown;
+      workflowId?: unknown;
+      name?: unknown;
+      uiRev?: unknown;
+    };
     return typeof row.id === "string" &&
+      typeof row.agentId === "string" &&
+      typeof row.workflowId === "string" &&
       typeof row.name === "string" &&
       typeof row.uiRev === "string" &&
       row.uiRev.length > 0
-      ? [{ id: row.id, name: row.name, uiRev: row.uiRev }]
+      ? [
+          {
+            id: row.id,
+            agentId: row.agentId,
+            workflowId: row.workflowId,
+            name: row.name,
+            uiRev: row.uiRev,
+          },
+        ]
       : [];
   });
 }

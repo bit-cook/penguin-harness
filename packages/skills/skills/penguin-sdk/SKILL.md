@@ -3,8 +3,8 @@ name: penguin-sdk
 description: Build AI apps on the Penguin Harness SDK — self-contained projects, the createSession/run streaming loop with thinking and image messages, a complete RAG recipe that ingests documents into a knowledge base and answers with citations behind a web UI, and integration into the running harness through the HMR API (fixed workflows, workspace tools and skills, embedded UI).
 short_description: Build AI and RAG apps on the Penguin Harness SDK.
 short_description_zh: 基于 Penguin SDK 构建 AI 与 RAG 应用。
-version: 21
-updated: 2026-08-15T00:00:00Z
+version: 22
+updated: 2026-08-15T12:00:00Z
 ---
 
 # Penguin Harness SDK
@@ -382,12 +382,16 @@ If you have no admin credential, say so to the user and stop — never try to re
 
 ### The workflow contract
 
+A workflow belongs to an agent and lives in that agent's folder — `agent_state/workflows/<workflowId>/` holds the script, its parked state, and any UI assets, so copying the agent directory carries its workflows along. The harness loads an agent's workflows when that agent activates and parks them back to the folder when it deactivates; the install API below writes the folder for you and hot-swaps the live instance when the agent is currently active.
+
 A workflow script is the BODY of a strict-mode JavaScript function receiving one argument named `context` (`context.state` is your previously parked state, or null on first install). It must RETURN an object:
 
 - `name`: non-empty string; `version`: number.
-- `run(input, ctx)` — the fixed workflow: receives the user input, drives agents through `ctx.runAgent(...)`, returns a JSON result. Keep it a few lines — complexity belongs in skills and app code, not in the workflow body.
-- `setup(ctx)` (optional) — register workspace integration points: `ctx.registerTool({ name, description, run })` for tools callable from the workspace and CLI; skill and UI registration go through the same context (the validator's 400 verdict names the exact accepted shape). Registrations are effect-bound: unloading the workflow deregisters exactly what it added.
-- `park()` (optional) — return your serializable state; it rides across reloads and platform upgrades.
+- `run(input, ctx)` — the fixed workflow: receives the user input, drives its agent through `ctx.runAgent(prompt)` (bound to the owning agent), returns a JSON result. Keep it a few lines — complexity belongs in skills and app code, not in the workflow body.
+- `setup(ctx)` (optional) — register workspace integration points: `ctx.registerTool({ name, description, run })` for tools callable from the workspace and CLI (the validator's 400 verdict names the exact accepted shape). Registrations are effect-bound: unloading the workflow deregisters exactly what it added.
+- `park()` (optional) — return your serializable state; it rides across reloads and is written back to the folder on deactivation.
+
+A workflow may ship the agent's own custom UI as static assets (an optional `ui` file manifest in the install payload, `index.html` required); the harness serves it under `/workflow/<agentId>/<workflowId>/` and shows it as the workflow's tab in the system UI while the agent is active.
 
 No `import`/`require`/`await`. No code outside the function body. State discipline: anything worth keeping goes through `park()`/`context.state`; everything else is rebuilt on reload — never stash state in globals.
 
@@ -401,26 +405,29 @@ cat > /tmp/workflow.js <<'SCRIPT'
 SCRIPT
 python3 - <<'PY' > /tmp/workflow.json
 import json
-print(json.dumps({"id": "my-workflow", "script": open("/tmp/workflow.js").read()}))
+print(json.dumps({"projectId": "default_project", "agentId": "default_agent",
+                  "workflowId": "my-workflow", "script": open("/tmp/workflow.js").read()}))
 PY
 curl -s -X POST -H "cookie: $HMR_COOKIE" -H "content-type: application/json" \
   -d @/tmp/workflow.json "$HMR_URL/api/hmr/workflows"
 ```
 
-- `201` → installed; the response lists the registered integration points.
+- `201` → written to the agent's folder (and hot-swapped live when that agent is active); the response lists the registered integration points.
 - `400` → the validator rejected it; `error.message` is the exact verdict (parse error, missing contract field, duplicate tool name…). Fix the script and retry. Do not retry more than 3 times — after that, show the user the last script and the verdict.
 
-Always verify before reporting success — run the workflow (or invoke a registered tool) and check the result against a case you can compute yourself:
+Always verify before reporting success — run the workflow (or invoke a registered tool) and check the result against a case you can compute yourself. Running requires the owning agent to be active (`GET /api/hmr/workflows` returns the currently active set; an agent activates when a session opens on it):
 
 ```bash
 curl -s -X POST -H "cookie: $HMR_COOKIE" -H "content-type: application/json" \
-  -d '{"input": {}}' "$HMR_URL/api/hmr/workflows/my-workflow/run"
+  -d '{"input": {}}' "$HMR_URL/api/hmr/workflows/default_agent%2Fmy-workflow/run"
 ```
 
 Then tell the user the workflow id, what it registered, and one example invocation.
 
 ### Maintenance
 
-- `GET /api/hmr/workflows` — installed workflows and their registrations.
-- `POST /api/hmr/workflows/<id>/reload` body `{"script": "..."}` — hot-swap the code; the parked state rides across (this is how you upgrade a workflow without losing its data).
-- `DELETE /api/hmr/workflows/<id>` — unload; everything it registered deregisters automatically.
+Workflows are addressed by `<agentId>/<workflowId>`; reload/delete also accept the fields in the body.
+
+- `GET /api/hmr/workflows` — the currently active workflows (with `projectId`/`agentId`/`workflowId`).
+- `POST /api/hmr/workflows/<id>/reload` body `{"projectId": …, "agentId": …, "workflowId": …, "script": "..."}` — rewrite the folder and hot-swap the live instance; the parked state rides across (this is how you upgrade a workflow without losing its data).
+- `DELETE /api/hmr/workflows/<id>` body `{"projectId": …, "agentId": …, "workflowId": …}` — remove the folder entry and, when active, the live instance; everything it registered deregisters automatically.
