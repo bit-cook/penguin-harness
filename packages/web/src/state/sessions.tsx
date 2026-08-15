@@ -36,6 +36,7 @@ import { createStore } from "zustand/vanilla";
 import * as api from "../api/endpoints";
 import { openUserEvents } from "../api/sse";
 import { recordDevConsoleEvent } from "../lib/dev-console";
+import { WORKFLOW_UI_UPDATED_EVENT } from "../lib/workflow-tabs";
 import {
   FOLDER_CATEGORIES,
   SIDEBAR_PAGE_SIZE,
@@ -428,6 +429,12 @@ export function SessionsProvider({ children }: { children: ReactNode }) {
           // post-reload replay line (dev-tools.tsx).
           console.info(`[hmr] web update arrived (rev ${ev.rev}) — reloading`);
           window.location.reload();
+          return;
+        }
+        if (ev.type === "workflow_ui_updated") {
+          window.dispatchEvent(
+            new CustomEvent(WORKFLOW_UI_UPDATED_EVENT, { detail: { id: ev.id, rev: ev.rev } }),
+          );
           return;
         }
         if (ev.type !== "schedule_fired") return;
