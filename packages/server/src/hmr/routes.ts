@@ -19,11 +19,15 @@
  */
 import zlib from "node:zlib";
 import { Hono } from "hono";
+import type { Json } from "@prismshadow/penguin-core/kernel";
 import { ifaceData } from "@prismshadow/penguin-core/kernel";
 import type { AppDeps } from "../app.js";
+import type { PlatformApi } from "../platform/platform.js";
 import { authMiddleware } from "../auth/middleware.js";
 import type { AppEnv } from "../auth/middleware.js";
 import { HttpError } from "../http/errors.js";
+import { evaluateWorkflow, ScriptContractError } from "../platform/workflow.js";
+import type { WorkflowTool } from "../platform/workflow.js";
 import type { ShellProcResource } from "./resources.js";
 
 /** Bind addresses considered safe by default; anything else needs HTTPS. */
@@ -178,6 +182,118 @@ export function hmrRoutes(deps: AppDeps): Hono<AppEnv> {
   });
 
 
+  // -- Workflows -----------------------------------------------------------
+
+  routes.post("/workflows", async (c) => {
+    const body = await workflowPayload(c);
+    if (typeof body.id !== "string" || body.id.length === 0) {
+      throw new HttpError(400, "bad_request", "provide `id` (non-empty string)");
+    }
+    if (typeof body.script !== "string") {
+      throw new HttpError(400, "bad_request", "provide `script` (string)");
+    }
+    try {
+      const summary = await hmr.mutate(async (inst) => {
+        const workflows = inst.api.workflows();
+        if (workflows.get(body.id!) !== undefined) {
+          throw new HttpError(409, "already_exists", `Workflow '${body.id}' already exists.`);
+        }
+        validateWorkflowSetup(body.script!, null, inst.api.workflowTools(), body.id!);
+        const ui =
+          body.ui === undefined ? null : await hmr.installWorkflowUi(body.id!, body.ui.files);
+        await workflows.add(body.id!, {
+          script: body.script!,
+          rev: 1,
+          state: null,
+          uiRev: ui?.rev ?? null,
+        });
+        inst.api.reseedWorkflow(body.id!);
+        return { summary: workflowSummary(inst.api, body.id!), ui };
+      });
+      if (summary.ui?.changed) {
+        deps.channels.broadcast(
+          "user:",
+          { type: "workflow_ui_updated", id: body.id, rev: summary.ui.rev },
+          "server_event",
+        );
+      }
+      return c.json(summary.summary, 201);
+    } catch (err) {
+      throw workflowHttpError(err);
+    }
+  });
+
+  routes.get("/workflows", async (c) => {
+    const inst = await hmr.ensure();
+    return c.json({
+      workflows: inst.api
+        .workflows()
+        .keys()
+        .map((id) => workflowSummary(inst.api, id)),
+    });
+  });
+
+  routes.post("/workflows/:id/reload", async (c) => {
+    const body = await workflowPayload(c);
+    if (typeof body.script !== "string") {
+      throw new HttpError(400, "bad_request", "provide `script` (string)");
+    }
+    const id = c.req.param("id");
+    try {
+      const summary = await hmr.mutate(async (inst) => {
+        const workflows = inst.api.workflows();
+        const old = workflows.get(id);
+        if (old === undefined) throw new HttpError(404, "not_found", "No such workflow.");
+        const parked = old.park() as { rev: number; state: Json };
+        validateWorkflowSetup(body.script!, parked.state, inst.api.workflowTools(), id);
+        const oldUiRev = old.describe().uiRev;
+        const ui = body.ui === undefined ? null : await hmr.installWorkflowUi(id, body.ui.files);
+        workflows.remove(id);
+        await workflows.add(id, {
+          script: body.script!,
+          rev: parked.rev + 1,
+          state: parked.state,
+          uiRev: ui?.rev ?? oldUiRev,
+        });
+        inst.api.reseedWorkflow(id);
+        return { summary: workflowSummary(inst.api, id), ui };
+      });
+      if (summary.ui?.changed) {
+        deps.channels.broadcast(
+          "user:",
+          { type: "workflow_ui_updated", id, rev: summary.ui.rev },
+          "server_event",
+        );
+      }
+      return c.json(summary.summary);
+    } catch (err) {
+      throw workflowHttpError(err);
+    }
+  });
+
+  routes.delete("/workflows/:id", async (c) => {
+    const id = c.req.param("id");
+    await hmr.mutate(async (inst) => {
+      const workflows = inst.api.workflows();
+      if (workflows.get(id) === undefined)
+        throw new HttpError(404, "not_found", "No such workflow.");
+      workflows.remove(id);
+      await hmr.removeWorkflowUi(id);
+    });
+    return c.json({ ok: true });
+  });
+
+  routes.post("/workflows/:id/run", async (c) => {
+    const body = await c.req.json<{ input?: unknown }>();
+    const id = c.req.param("id");
+    const result = await hmr.mutate(async (inst) => {
+      const workflow = inst.api.workflows().get(id);
+      if (workflow === undefined) throw new HttpError(404, "not_found", "No such workflow.");
+      return await workflow.run(body.input ?? null, { runAgent: deps.runWorkflowAgent });
+    });
+    return c.json({ result: toJson(result) });
+  });
+
   // -- Terminals: the live-state proof that a resource survives a platform swap.
   // These are the last business routes left in the runtime. A NEW business API does
   // not grow another one here — it is served by the platform itself through the HTTP
@@ -238,4 +354,110 @@ export function hmrRoutes(deps: AppDeps): Hono<AppEnv> {
   });
 
   return routes;
+}
+
+/**
+ * JSON.stringify's own notion of "not representable" (function, symbol, a
+ * cycle) surfaces as a thrown error, not a silent `undefined` — with one
+ * carve-out: a void return (undefined) is a SUCCESSFUL call with no result
+ * and maps to null, since the side effect already happened and reporting an
+ * error would misread it.
+ */
+function toJson(value: unknown): Json {
+  if (value === undefined) return null;
+  const text = JSON.stringify(value);
+  if (text === undefined) {
+    throw new Error("result is not JSON-serializable (a function or a symbol)");
+  }
+  return JSON.parse(text) as Json;
+}
+
+function validateWorkflowSetup(
+  script: string,
+  state: Json,
+  installed: ReturnType<PlatformApi["workflowTools"]>,
+  workflowId: string,
+): void {
+  const workflow = evaluateWorkflow(script, state);
+  const names = new Set(
+    installed.filter((tool) => tool.workflowId !== workflowId).map((tool) => tool.name),
+  );
+  workflow.setup?.({
+    registerTool(tool) {
+      validateToolShape(tool);
+      if (names.has(tool.name)) {
+        throw new ScriptContractError(`tool '${tool.name}' is already registered`);
+      }
+      names.add(tool.name);
+    },
+  });
+}
+
+function validateToolShape(tool: WorkflowTool): void {
+  if (typeof tool !== "object" || tool === null)
+    throw new ScriptContractError("tool contract violation: must be an object");
+  if (typeof tool.name !== "string" || tool.name.length === 0)
+    throw new ScriptContractError("tool contract violation: name must be a non-empty string");
+  if (typeof tool.description !== "string")
+    throw new ScriptContractError("tool contract violation: description must be a string");
+  if (typeof tool.run !== "function")
+    throw new ScriptContractError("tool contract violation: run must be a function");
+}
+
+function workflowSummary(api: PlatformApi, id: string) {
+  const workflow = api.workflows().get(id)!;
+  return {
+    id,
+    ...workflow.describe(),
+    tools: api
+      .workflowTools()
+      .filter((tool) => tool.workflowId === id)
+      .map(({ workflowId: _, ...tool }) => tool),
+  };
+}
+
+function workflowHttpError(err: unknown): Error {
+  if (err instanceof HttpError) return err;
+  if (err instanceof ScriptContractError || err instanceof Error) {
+    return new HttpError(400, "bad_request", err.message);
+  }
+  return new HttpError(400, "bad_request", String(err));
+}
+
+type WorkflowPayload = {
+  id?: string;
+  script?: string;
+  ui?: { files: Record<string, string> };
+};
+
+async function workflowPayload(c: {
+  req: {
+    header(name: string): string | undefined;
+    arrayBuffer(): Promise<ArrayBuffer>;
+    json<T>(): Promise<T>;
+  };
+}): Promise<WorkflowPayload> {
+  const contentType = (c.req.header("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
+  try {
+    const body =
+      contentType === "application/gzip" || contentType === "application/octet-stream"
+        ? (JSON.parse(
+            zlib.gunzipSync(Buffer.from(await c.req.arrayBuffer())).toString("utf8"),
+          ) as WorkflowPayload)
+        : await c.req.json<WorkflowPayload>();
+    if (
+      body.ui !== undefined &&
+      (typeof body.ui !== "object" ||
+        body.ui === null ||
+        typeof body.ui.files !== "object" ||
+        body.ui.files === null ||
+        Array.isArray(body.ui.files))
+    ) {
+      throw new Error("`ui.files` must be an object");
+    }
+    return body;
+  } catch (err) {
+    if (err instanceof HttpError) throw err;
+    throw new HttpError(400, "bad_request", err instanceof Error ? err.message : String(err));
+  }
 }

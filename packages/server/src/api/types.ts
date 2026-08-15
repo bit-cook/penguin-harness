@@ -1102,6 +1102,7 @@ export type ServerEvent =
   | { type: "hello" }
   /** The served web assets were hot-swapped by a platform upgrade: clients reload to pick them up. */
   | { type: "web_updated"; rev: string }
+  | { type: "workflow_ui_updated"; id: string; rev: string }
   /** New session registered (pushed over the parent session's channel for subagent sessions): frontend refreshes the list in place. */
   | {
       type: "session_created";

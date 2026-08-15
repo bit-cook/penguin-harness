@@ -60,6 +60,8 @@ export interface TestApp {
 }
 
 export interface TestAppOptions extends BuildDepsOverrides {
+  /** Workflow agent runner seam used by HMR workflow integration tests. */
+  runWorkflowAgent?: (prompt: string) => Promise<string>;
   /** Runs before seeding the admin (for scenarios pre-populating a default_project config as the CLI would). */
   beforeSeed?: (root: string) => Promise<void>;
   /** Overrides merged onto the default test ServerConfig (e.g. `previewOrigin`). */

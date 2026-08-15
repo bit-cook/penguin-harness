@@ -139,6 +139,7 @@ export interface AppDeps {
   desktop: DesktopService | null;
   /** HMR host: loads/swaps/persists the platform and web bundles (park/boot kernel). */
   hmr: HmrHost;
+  runWorkflowAgent: (prompt: string) => Promise<string>;
   /** Request log output (minimal one-liner); tests inject a noop. */
   log: (line: string) => void;
 }
@@ -152,6 +153,7 @@ export interface BuildDepsOverrides {
   updateCheck?: UpdateCheckService;
   log?: (line: string) => void;
   now?: () => Date;
+  runWorkflowAgent?: (prompt: string) => Promise<string>;
 }
 
 /** Assemble all services from config (shared by production and tests; tests pass dbPath=":memory:" and a temp root). */
@@ -344,6 +346,11 @@ export function buildAppDeps(config: ServerConfig, overrides: BuildDepsOverrides
     errors,
     desktop: config.desktopToken !== null ? new DesktopService(config.desktopToken) : null,
     hmr: new HmrHost(config.root),
+    runWorkflowAgent:
+      overrides.runWorkflowAgent ??
+      (async () => {
+        throw new Error("workflow runAgent is not configured");
+      }),
     log,
   };
 }
@@ -428,9 +435,8 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   if (deps.desktop) {
     app.route("/api/desktop", desktopRoutes(deps));
   }
-  // Hot platform APIs authenticate themselves (local-agent Bearer token OR
-  // admin cookie session, see hot/routes.ts), so they mount outside the
-  // cookie-only authMiddleware below.
+  // Hot platform APIs authenticate themselves with an admin cookie session
+  // (see hmr/routes.ts), so they mount outside the global authMiddleware below.
   app.route("/api/hmr", hmrRoutes(deps));
 
   // THE seam: from here down, every route is one the platform may take over by push. Mounted
@@ -473,6 +479,8 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   // signed token in the path is the only credential. Mounted before static hosting so the
   // SPA fallback cannot swallow it.
   app.route("/preview", previewRoutes(deps));
+
+  registerWorkflowUiRoutes(app, (id) => deps.hmr.resolveWorkflowUi(id));
 
   // Static hosting (production): serves the frontend build output with SPA fallback to
   // index.html. The source resolves per request — the hot host can point it at a
@@ -647,5 +655,40 @@ function registerStaticRoutes(app: Hono<AppEnv>, resolveSource: () => Promise<We
     // response would cost more than the 304s save.
     const etag = `W/"${content.byteLength}-${Math.round(mtimeMs)}"`;
     return staticResponse(c, content, path.relative(base, file).split(path.sep).join("/"), etag);
+  });
+}
+
+function registerWorkflowUiRoutes(
+  app: Hono<AppEnv>,
+  resolveFiles: (id: string) => Promise<Map<string, Buffer> | null>,
+): void {
+  app.get("/workflow/:id/*", async (c) => {
+    const id = c.req.param("id");
+    const files = await resolveFiles(id);
+    if (files === null) {
+      return c.json(errorBody("not_found", "Workflow UI does not exist."), 404);
+    }
+    let reqPath: string;
+    try {
+      reqPath = decodeURIComponent(c.req.path);
+    } catch {
+      return c.json(errorBody("not_found", "Resource does not exist."), 404);
+    }
+    const prefix = `/workflow/${id}/`;
+    if (!reqPath.startsWith(prefix)) {
+      return c.json(errorBody("not_found", "Resource does not exist."), 404);
+    }
+    const rel = reqPath.slice(prefix.length) || "index.html";
+    const servedPath = files.has(rel) ? rel : "index.html";
+    const content = files.get(servedPath);
+    if (content === undefined) {
+      return c.json(errorBody("not_found", "Resource does not exist."), 404);
+    }
+    const mime =
+      CONTENT_TYPES[path.extname(servedPath).toLowerCase()] ?? "application/octet-stream";
+    return new Response(new Uint8Array(content), {
+      status: 200,
+      headers: { "Content-Type": mime },
+    });
   });
 }

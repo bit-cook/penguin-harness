@@ -116,6 +116,7 @@ export class HmrHost {
   private restored = false;
   /** The freeze, as a queue: everything the HTTP layer gates on chains here. */
   private opQueue: Promise<unknown> = Promise.resolve();
+  private workflowUi = new Map<string, { rev: string; files: Map<string, Buffer> }>();
 
   constructor(private readonly root: string) {
     this.hmrDir = path.join(root, "hmr");
@@ -184,9 +185,50 @@ export class HmrHost {
     } catch {
       return; // nothing committed yet
     }
-    if (manifest.platform === undefined && manifest.web === undefined) {
-      return; // nothing committed yet
+    // Per-workflow UI artifacts: independent of the platform+web triad below — a
+    // workflow's UI is a per-id best-effort restore, never gates the platform/web
+    // restore and is never gated by it either.
+    if (manifest.workflowUi !== undefined) {
+      for (const [id, ui] of Object.entries(manifest.workflowUi)) {
+        try {
+          const gz = await fsp.readFile(path.join(this.hmrDir, ui.artifact));
+          this.workflowUi.set(id, { rev: ui.rev, files: filesMapFromGzip(gz) });
+        } catch (err) {
+          this.warn(`persisted workflow UI '${id}' missing/corrupt; ignoring: ${errMsg(err)}`);
+        }
+      }
     }
+
+    if (manifest.platform === undefined && manifest.web === undefined) {
+      return; // nothing else committed
+    }
+
+    // A "packaged" platform entry is a tree-mutation snapshot (see mutate() /
+    // persistCurrentSnapshot) written WITHOUT ever pushing a real bundle — e.g.
+    // installing a workflow while still running the packaged default. It restores
+    // on its own, independent of whether a web dist was ever pushed: the packaged
+    // web default isn't tied to a platform code version, so there is no
+    // platform/web pair to keep atomic here.
+    if (manifest.platform !== undefined && "packaged" in manifest.platform) {
+      try {
+        const doc = JSON.parse(
+          await fsp.readFile(path.join(this.hmrDir, manifest.platform.park), "utf8"),
+        ) as Json;
+        this.instance = (await boot(
+          packagedPlatform.impl,
+          packagedPlatform.iface,
+          doc,
+          this.resources,
+        )) as Instance<PlatformApi>;
+        this.implId = packagedPlatform.id;
+      } catch (err) {
+        this.warn(
+          `persisted packaged-platform snapshot failed to restore; booting a fresh default: ${errMsg(err)}`,
+        );
+      }
+      return;
+    }
+
     try {
       if (manifest.platform === undefined) {
         throw new Error("harness.json has no `platform` entry");
@@ -230,6 +272,21 @@ export class HmrHost {
   upgradeAll(target: UpgradeAllTarget): Promise<UpgradeOutcome> {
     const run = this.opQueue.then(() => this.doUpgradeAll(target));
     // The queue must survive a failed upgrade: swallow for chaining only.
+    this.opQueue = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  /** Serialize a successful in-place tree mutation and commit its new snapshot. */
+  mutate<T>(operation: (instance: Instance<PlatformApi>) => Promise<T>): Promise<T> {
+    const run = this.opQueue.then(async () => {
+      const instance = await this.ensure();
+      const result = await operation(instance);
+      await this.persistCurrentSnapshot(instance.park());
+      return result;
+    });
     this.opQueue = run.then(
       () => undefined,
       () => undefined,
@@ -341,6 +398,84 @@ export class HmrHost {
     return this.webMem !== null ? { kind: "mem", files: this.webMem } : null;
   }
 
+  // -- Per-workflow UI (a workflow's own static assets, hot-installable alongside
+  // its script — see routes.ts's /workflows routes) ------------------------
+
+  async resolveWorkflowUi(id: string): Promise<Map<string, Buffer> | null> {
+    await this.ensure();
+    return this.workflowUi.get(id)?.files ?? null;
+  }
+
+  workflowUiRev(id: string): string | null {
+    return this.workflowUi.get(id)?.rev ?? null;
+  }
+
+  async installWorkflowUi(
+    id: string,
+    files: Record<string, string>,
+  ): Promise<{ rev: string; changed: boolean }> {
+    if (typeof files["index.html"] !== "string")
+      throw new Error("workflow UI manifest has no index.html");
+    for (const rel of Object.keys(files)) {
+      if (!isSafeRelPath(rel)) throw new Error(`unsafe path in workflow UI manifest: ${rel}`);
+    }
+    const gz = zlib.gzipSync(Buffer.from(JSON.stringify({ files })));
+    const rev = filesDigest(files).slice(0, 12);
+    const previous = this.workflowUi.get(id);
+    if (previous?.rev === rev) return { rev, changed: false };
+    const digest = rev;
+    const storeKey = sha1(id).slice(0, 16);
+    const dir = path.join(this.storeDir, "workflow-ui", storeKey);
+    await fsp.mkdir(dir, { recursive: true });
+    const artifact = `store/workflow-ui/${storeKey}/${digest}.webz`;
+    await fsp.writeFile(path.join(this.hmrDir, artifact), gz);
+    this.workflowUi.set(id, { rev, files: filesMapFromGzip(gz) });
+    // commitManifest takes a bare producer (see its own doc) — read the current
+    // manifest ourselves first so this stays a merge (only `workflowUi` moves;
+    // `platform`/`cli`/`web` ride through untouched).
+    const current = await this.readManifest();
+    await this.commitManifest(() => ({
+      ...current,
+      workflowUi: { ...(current.workflowUi ?? {}), [id]: { rev, artifact } },
+    }));
+    await this.pruneWorkflowUi(id, rev);
+    return { rev, changed: true };
+  }
+
+  async removeWorkflowUi(id: string): Promise<void> {
+    if (!this.workflowUi.delete(id)) return;
+    const current = await this.readManifest();
+    const workflowUi = { ...(current.workflowUi ?? {}) };
+    delete workflowUi[id];
+    await this.commitManifest(() => ({ ...current, workflowUi }));
+  }
+
+  private async pruneWorkflowUi(id: string, currentRev: string): Promise<void> {
+    const dir = path.join(this.storeDir, "workflow-ui", sha1(id).slice(0, 16));
+    let entries: Array<{ name: string; mtime: number }>;
+    try {
+      entries = await Promise.all(
+        (await fsp.readdir(dir))
+          .filter((name) => name.endsWith(".webz"))
+          .map(async (name) => ({ name, mtime: (await fsp.stat(path.join(dir, name))).mtimeMs })),
+      );
+    } catch {
+      return;
+    }
+    const keep = new Set(
+      entries
+        .sort((a, b) => b.mtime - a.mtime)
+        .slice(0, STORE_KEEP)
+        .map((entry) => entry.name),
+    );
+    keep.add(`${currentRev}.webz`);
+    await Promise.all(
+      entries
+        .filter((entry) => !keep.has(entry.name))
+        .map((entry) => fsp.rm(path.join(dir, entry.name), { force: true })),
+    );
+  }
+
   // -- Persistence ----------------------------------------------------------
 
   /**
@@ -386,6 +521,42 @@ export class HmrHost {
       }));
     } catch (err) {
       this.warn(`update not persisted (filesystem unavailable?): ${errMsg(err)}`);
+    }
+  }
+
+  /**
+   * Persists a snapshot of the CURRENTLY BOOTED platform's tree — used by
+   * mutate() for in-place tree edits (e.g. installing a workflow) that never push
+   * new code, so there is no bundle+web pair to keep atomic here: only
+   * `platform.park` moves; `cli`/`web` ride through untouched. Read-modify-write
+   * against the manifest on disk, since commitManifest itself takes a bare
+   * producer (see its own doc) rather than a merge function.
+   */
+  private async persistCurrentSnapshot(doc: Json): Promise<void> {
+    const json = JSON.stringify(doc);
+    const sha = sha1(json).slice(0, 16);
+    const dir = path.join(this.storeDir, "platform");
+    await fsp.mkdir(dir, { recursive: true });
+    const park = `store/platform/${sha}.park.json`;
+    await fsp.writeFile(path.join(this.hmrDir, park), json);
+    const current = await this.readManifest();
+    if (this.implId === packagedPlatform.id) {
+      await this.commitManifest(() => ({ ...current, platform: { packaged: true, park } }));
+      return;
+    }
+    if (current.platform === undefined || "packaged" in current.platform) {
+      throw new Error(`cannot persist snapshot for platform '${this.implId}' without its bundle`);
+    }
+    const bundle = current.platform.bundle;
+    await this.commitManifest(() => ({ ...current, platform: { bundle, park } }));
+  }
+
+  /** Reads and parses harness.json; `{}` when missing or corrupt (nothing committed yet). */
+  private async readManifest(): Promise<Manifest> {
+    try {
+      return JSON.parse(await fsp.readFile(this.manifestPath, "utf8")) as Manifest;
+    } catch {
+      return {};
     }
   }
 
@@ -441,7 +612,10 @@ export class HmrHost {
     };
 
     const platformDir = path.join(this.storeDir, "platform");
-    const platformRef = manifest.platform?.bundle.match(/([0-9a-f]+)\.mjs$/)?.[1] ?? null;
+    const platformRef =
+      manifest.platform !== undefined && "bundle" in manifest.platform
+        ? (manifest.platform.bundle.match(/([0-9a-f]+)\.mjs$/)?.[1] ?? null)
+        : null;
     await keepNewest(
       platformDir,
       (name) => /^([0-9a-f]+)\.mjs$/.exec(name)?.[1] ?? null,

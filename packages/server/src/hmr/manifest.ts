@@ -25,7 +25,7 @@ import path from "node:path";
  * relative to hmrDir (`<root>/hmr`).
  */
 export interface Manifest {
-  platform?: { bundle: string; park: string };
+  platform?: { bundle: string; park: string } | { packaged: true; park: string };
   /**
    * The CLI's own bundle pointer — its own independent file (a different sha from
    * `platform.bundle`; the two are separately compiled artifacts), kept as its own
@@ -33,6 +33,8 @@ export interface Manifest {
    * never has to know about parked documents.
    */
   cli?: { bundle: string };
+  /** Per-workflow UI artifacts (keyed by workflow id): a rev + the stored artifact path. */
+  workflowUi?: Record<string, { rev: string; artifact: string }>;
   /** One gzip(JSON.stringify({ files })) artifact, restored straight into memory. */
   web?: { manifest: string };
 }
