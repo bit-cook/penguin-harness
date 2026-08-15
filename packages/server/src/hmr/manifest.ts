@@ -33,8 +33,14 @@ export interface Manifest {
    * never has to know about parked documents.
    */
   cli?: { bundle: string };
-  /** Per-workflow UI artifacts (keyed by workflow id): a rev + the stored artifact path. */
+  /**
+   * Legacy workflow persistence: ignored on restore (host.ts warns and moves on) — workflows
+   * now load from Agent folders, not harness.json. Kept in the type only so an older manifest
+   * carrying them still parses.
+   */
   workflowUi?: Record<string, { rev: string; artifact: string }>;
+  /** Legacy workflow persistence (see `workflowUi`'s doc): ignored on restore, kept for parsing. */
+  workflows?: unknown;
   /** One gzip(JSON.stringify({ files })) artifact, restored straight into memory. */
   web?: { manifest: string };
 }

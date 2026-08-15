@@ -222,6 +222,10 @@ export interface SessionManagerDeps {
   log?: (line: string) => void;
   /** Goal run-state persistence (optional like `titles`: without it, goals run but leave no restorable record). */
   goals?: GoalsRepo;
+  agentLifecycle?: {
+    activate(projectId: string, agentId: string): Promise<void>;
+    deactivate(projectId: string, agentId: string): Promise<void>;
+  };
 }
 
 /** One queued follow-up task (`queueIfBusy`): the task input plus the per-turn thinking level it was posted with. */
@@ -396,6 +400,7 @@ export class SessionManager {
   /** Open streaming fragments of running sessions (fed by drive, served to GET /messages; see live-tail.ts). */
   private readonly liveTail = new LiveTailTracker();
   private readonly sweepTimer: NodeJS.Timeout;
+  private readonly lifecyclePending = new Set<Promise<void>>();
 
   constructor(private readonly deps: SessionManagerDeps) {
     this.log = deps.log ?? ((line) => console.error(line));
@@ -482,6 +487,7 @@ export class SessionManager {
       pendingSteering: [],
       lastActivityMs: Date.now(),
     });
+    this.trackLifecycle(this.deps.agentLifecycle?.activate(row.projectId, row.agentId));
   }
 
   /**
@@ -949,6 +955,7 @@ export class SessionManager {
     const dispose = (): void => entry.session.dispose?.();
     if (entry.running) void entry.running.then(dispose, dispose);
     else dispose();
+    this.trackLifecycle(this.deps.agentLifecycle?.deactivate(entry.projectId, entry.agentId));
   }
 
   /**
@@ -1034,6 +1041,11 @@ export class SessionManager {
       entry.abort.abort();
       if (entry.running) pending.push(entry.running);
     }
+    for (const entry of this.entries.values()) {
+      this.trackLifecycle(this.deps.agentLifecycle?.deactivate(entry.projectId, entry.agentId));
+    }
+    this.entries.clear();
+    pending.push(...this.lifecyclePending);
     if (pending.length === 0) return;
     await Promise.race([
       Promise.allSettled(pending).then(() => undefined),
@@ -1061,6 +1073,7 @@ export class SessionManager {
       if (entry.session.listBackgroundCommands?.().some((p) => p.running)) continue;
       if (now - entry.lastActivityMs <= idleMs) continue;
       this.entries.delete(key);
+      this.disposeRemoved(entry);
     }
   }
 
@@ -1135,6 +1148,7 @@ export class SessionManager {
         return existing;
       }
       this.entries.delete(sessionId);
+      this.disposeRemoved(existing);
     }
     const row = this.deps.sessions.findById(sessionId);
     if (!row) {
@@ -1178,7 +1192,14 @@ export class SessionManager {
       lastActivityMs: Date.now(),
     };
     this.entries.set(currentId, entry);
+    await this.deps.agentLifecycle?.activate(row.projectId, row.agentId);
     return entry;
+  }
+
+  private trackLifecycle(promise: Promise<void> | undefined): void {
+    if (!promise) return;
+    this.lifecyclePending.add(promise);
+    void promise.finally(() => this.lifecyclePending.delete(promise));
   }
 
   /**

@@ -85,6 +85,7 @@ import { UpdateCheckService } from "./services/update-check-service.js";
 import { UsageService } from "./services/usage-service.js";
 import { WorkspaceFilesService } from "./services/workspace-files-service.js";
 import { HmrHost } from "./hmr/host.js";
+import { WorkflowService } from "./hmr/workflow-service.js";
 import { hmrRoutes } from "./hmr/routes.js";
 import { platformHttpSeam } from "./hmr/http-seam.js";
 import {
@@ -139,7 +140,7 @@ export interface AppDeps {
   desktop: DesktopService | null;
   /** HMR host: loads/swaps/persists the platform and web bundles (park/boot kernel). */
   hmr: HmrHost;
-  runWorkflowAgent: (prompt: string) => Promise<string>;
+  workflows: WorkflowService;
   /** Request log output (minimal one-liner); tests inject a noop. */
   log: (line: string) => void;
 }
@@ -153,7 +154,7 @@ export interface BuildDepsOverrides {
   updateCheck?: UpdateCheckService;
   log?: (line: string) => void;
   now?: () => Date;
-  runWorkflowAgent?: (prompt: string) => Promise<string>;
+  runWorkflowAgent?: (projectId: string, agentId: string, prompt: string) => Promise<string>;
 }
 
 /** Assemble all services from config (shared by production and tests; tests pass dbPath=":memory:" and a temp root). */
@@ -234,6 +235,15 @@ export function buildAppDeps(config: ServerConfig, overrides: BuildDepsOverrides
   const titles =
     overrides.titles ??
     new TitleGenerator({ sessions: sessionsRepo, channels, recorder, errors, log });
+  const hmr = new HmrHost(config.root);
+  const workflows = new WorkflowService(
+    config.root,
+    hmr,
+    overrides.runWorkflowAgent ??
+      (async () => {
+        throw new Error("workflow runAgent is not configured");
+      }),
+  );
   const manager = new SessionManager({
     sessions: sessionsRepo,
     channels,
@@ -244,6 +254,7 @@ export function buildAppDeps(config: ServerConfig, overrides: BuildDepsOverrides
     titles,
     log,
     goals: goalsRepo,
+    agentLifecycle: workflows,
   });
   managerRef = manager;
 
@@ -345,12 +356,8 @@ export function buildAppDeps(config: ServerConfig, overrides: BuildDepsOverrides
     sessionSources,
     errors,
     desktop: config.desktopToken !== null ? new DesktopService(config.desktopToken) : null,
-    hmr: new HmrHost(config.root),
-    runWorkflowAgent:
-      overrides.runWorkflowAgent ??
-      (async () => {
-        throw new Error("workflow runAgent is not configured");
-      }),
+    hmr,
+    workflows,
     log,
   };
 }
@@ -480,7 +487,7 @@ export function createApp(deps: AppDeps): Hono<AppEnv> {
   // SPA fallback cannot swallow it.
   app.route("/preview", previewRoutes(deps));
 
-  registerWorkflowUiRoutes(app, (id) => deps.hmr.resolveWorkflowUi(id));
+  registerWorkflowUiRoutes(app, deps.workflows);
 
   // Static hosting (production): serves the frontend build output with SPA fallback to
   // index.html. The source resolves per request — the hot host can point it at a
@@ -658,35 +665,28 @@ function registerStaticRoutes(app: Hono<AppEnv>, resolveSource: () => Promise<We
   });
 }
 
-function registerWorkflowUiRoutes(
-  app: Hono<AppEnv>,
-  resolveFiles: (id: string) => Promise<Map<string, Buffer> | null>,
-): void {
-  app.get("/workflow/:id/*", async (c) => {
-    const id = c.req.param("id");
-    const files = await resolveFiles(id);
-    if (files === null) {
-      return c.json(errorBody("not_found", "Workflow UI does not exist."), 404);
-    }
+function registerWorkflowUiRoutes(app: Hono<AppEnv>, workflows: WorkflowService): void {
+  app.get("/workflow/:agentId/:workflowId/*", async (c) => {
+    const agentId = c.req.param("agentId");
+    const workflowId = c.req.param("workflowId");
     let reqPath: string;
     try {
       reqPath = decodeURIComponent(c.req.path);
     } catch {
       return c.json(errorBody("not_found", "Resource does not exist."), 404);
     }
-    const prefix = `/workflow/${id}/`;
+    const prefix = `/workflow/${agentId}/${workflowId}/`;
     if (!reqPath.startsWith(prefix)) {
       return c.json(errorBody("not_found", "Resource does not exist."), 404);
     }
     const rel = reqPath.slice(prefix.length) || "index.html";
-    const servedPath = files.has(rel) ? rel : "index.html";
-    const content = files.get(servedPath);
-    if (content === undefined) {
+    const resolved = await workflows.resolveUi(agentId, workflowId, rel);
+    if (!resolved) {
       return c.json(errorBody("not_found", "Resource does not exist."), 404);
     }
     const mime =
-      CONTENT_TYPES[path.extname(servedPath).toLowerCase()] ?? "application/octet-stream";
-    return new Response(new Uint8Array(content), {
+      CONTENT_TYPES[path.extname(resolved.path).toLowerCase()] ?? "application/octet-stream";
+    return new Response(new Uint8Array(resolved.bytes), {
       status: 200,
       headers: { "Content-Type": mime },
     });

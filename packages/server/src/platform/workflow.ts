@@ -64,22 +64,20 @@ export function evaluateWorkflow(script: string, state: Json = null): WorkflowOb
   return out as unknown as WorkflowObject;
 }
 
-export type WorkflowCtx = { script: string; rev: number; state: Json; uiRev?: string | null };
+export type WorkflowCtx = { script: string; rev: number; state: Json };
 
 const JsonType = type("unknown").narrow((value): value is Json => isJson(value));
 
 export interface WorkflowApi extends Park {
-  describe(): { name: string; version: number; rev: number; uiRev: string | null };
-  setup(id: string, registry: WorkflowRegistry): void;
-  run(input: unknown, ctx: WorkflowRunCtx): Promise<unknown>;
+  describe(): { name: string; version: number; rev: number };
+  setup(id: string, registry: WorkflowRegistry, runCtx: WorkflowRunCtx): void;
+  run(input: unknown): Promise<unknown>;
 }
 
 export const WorkflowIface = defineIface<WorkflowApi, WorkflowCtx>({
   name: "workflow",
   version: 1,
-  context: schema<WorkflowCtx>(
-    type({ script: "string", rev: "number", state: JsonType, "uiRev?": "string | null" }),
-  ),
+  context: schema<WorkflowCtx>(type({ script: "string", rev: "number", state: JsonType })),
   methods: ["park", "describe", "setup", "run"],
 });
 
@@ -87,6 +85,7 @@ export const workflowImpl: Impl<WorkflowApi, WorkflowCtx> = {
   create(nodeCtx, context) {
     const obj = evaluateWorkflow(context.script, context.state);
     let unloading = false;
+    let boundRunCtx: WorkflowRunCtx | null = null;
     nodeCtx.effect(() => {
       unloading = true;
     });
@@ -95,15 +94,14 @@ export const workflowImpl: Impl<WorkflowApi, WorkflowCtx> = {
         script: context.script,
         rev: context.rev,
         state: jsonValue(obj.park?.() ?? null, "workflow park state"),
-        uiRev: context.uiRev ?? null,
       }),
       describe: () => ({
         name: obj.name,
         version: obj.version,
         rev: context.rev,
-        uiRev: context.uiRev ?? null,
       }),
-      setup(id, registry) {
+      setup(id, registry, runCtx) {
+        boundRunCtx = runCtx;
         obj.setup?.({
           registerTool(tool) {
             if (unloading) {
@@ -117,8 +115,9 @@ export const workflowImpl: Impl<WorkflowApi, WorkflowCtx> = {
           },
         });
       },
-      async run(input, ctx) {
-        return await obj.run(input, ctx);
+      async run(input) {
+        if (!boundRunCtx) throw new Error("workflow is not activated");
+        return await obj.run(input, boundRunCtx);
       },
     };
   },

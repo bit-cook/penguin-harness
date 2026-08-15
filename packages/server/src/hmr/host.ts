@@ -116,7 +116,6 @@ export class HmrHost {
   private restored = false;
   /** The freeze, as a queue: everything the HTTP layer gates on chains here. */
   private opQueue: Promise<unknown> = Promise.resolve();
-  private workflowUi = new Map<string, { rev: string; files: Map<string, Buffer> }>();
 
   constructor(private readonly root: string) {
     this.hmrDir = path.join(root, "hmr");
@@ -185,18 +184,16 @@ export class HmrHost {
     } catch {
       return; // nothing committed yet
     }
-    // Per-workflow UI artifacts: independent of the platform+web triad below — a
-    // workflow's UI is a per-id best-effort restore, never gates the platform/web
-    // restore and is never gated by it either.
-    if (manifest.workflowUi !== undefined) {
-      for (const [id, ui] of Object.entries(manifest.workflowUi)) {
-        try {
-          const gz = await fsp.readFile(path.join(this.hmrDir, ui.artifact));
-          this.workflowUi.set(id, { rev: ui.rev, files: filesMapFromGzip(gz) });
-        } catch (err) {
-          this.warn(`persisted workflow UI '${id}' missing/corrupt; ignoring: ${errMsg(err)}`);
-        }
-      }
+    // Legacy: workflow install used to persist through harness.json (a per-id
+    // `workflowUi` artifact map, and workflow definitions riding in the platform's
+    // own park doc — see git history around d813c2d/persistCurrentSnapshot).
+    // Workflows now load from Agent folders (see workflow-service.ts) — a manifest
+    // still carrying either is never trusted, just warned about and ignored; the
+    // Agent folder is the sole source of truth.
+    if (manifest.workflowUi !== undefined || manifest.workflows !== undefined) {
+      this.warn(
+        "legacy persisted workflows in harness.json are ignored; workflows now load from Agent folders",
+      );
     }
 
     if (manifest.platform === undefined && manifest.web === undefined) {
@@ -217,7 +214,7 @@ export class HmrHost {
         this.instance = (await boot(
           packagedPlatform.impl,
           packagedPlatform.iface,
-          doc,
+          withoutDynamicWorkflows(doc),
           this.resources,
         )) as Instance<PlatformApi>;
         this.implId = packagedPlatform.id;
@@ -254,7 +251,7 @@ export class HmrHost {
       const instance = (await boot(
         bundle.impl,
         bundle.iface,
-        doc,
+        withoutDynamicWorkflows(doc),
         this.resources,
       )) as Instance<PlatformApi>;
       this.instance = instance;
@@ -280,11 +277,14 @@ export class HmrHost {
   }
 
   /** Serialize a successful in-place tree mutation and commit its new snapshot. */
-  mutate<T>(operation: (instance: Instance<PlatformApi>) => Promise<T>): Promise<T> {
+  mutate<T>(
+    operation: (instance: Instance<PlatformApi>) => Promise<T>,
+    persist = true,
+  ): Promise<T> {
     const run = this.opQueue.then(async () => {
       const instance = await this.ensure();
       const result = await operation(instance);
-      await this.persistCurrentSnapshot(instance.park());
+      if (persist) await this.persistCurrentSnapshot(withoutDynamicWorkflows(instance.park()));
       return result;
     });
     this.opQueue = run.then(
@@ -313,7 +313,7 @@ export class HmrHost {
     // Park to disk before touching anything: crash-safe by construction.
     await fsp.mkdir(this.hmrDir, { recursive: true });
     const parkPath = path.join(this.hmrDir, "platform.park.json");
-    await fsp.writeFile(parkPath, JSON.stringify(current.park(), null, 2));
+    await fsp.writeFile(parkPath, JSON.stringify(withoutDynamicWorkflows(current.park()), null, 2));
 
     const result = await upgrade({
       current,
@@ -338,11 +338,15 @@ export class HmrHost {
     this.instance = result.instance as Instance<PlatformApi>;
     this.implId = bundle.id;
     this.webMem = webMem;
-    await fsp.writeFile(parkPath, JSON.stringify(result.doc, null, 2));
+    // Dynamic workflow tree state never rides in the persisted platform doc (it
+    // lives per-Agent-folder — see workflow-service.ts); strip it before both the
+    // crash-safe park write and the committed version.
+    const persistedDoc = withoutDynamicWorkflows(result.doc);
+    await fsp.writeFile(parkPath, JSON.stringify(persistedDoc, null, 2));
 
     const digest = filesDigest(target.web);
     const gz = zlib.gzipSync(Buffer.from(JSON.stringify({ files: target.web })));
-    await this.persistVersion(target.platform, target.cli, result.doc, gz, digest.slice(0, 16));
+    await this.persistVersion(target.platform, target.cli, persistedDoc, gz, digest.slice(0, 16));
 
     return {
       status: "ok",
@@ -396,84 +400,6 @@ export class HmrHost {
   /** Static hosting's resolution: an in-memory pushed/restored dist, or null (the caller falls back to the configured webDist). */
   resolveWebSource(): { kind: "mem"; files: Map<string, Buffer> } | null {
     return this.webMem !== null ? { kind: "mem", files: this.webMem } : null;
-  }
-
-  // -- Per-workflow UI (a workflow's own static assets, hot-installable alongside
-  // its script — see routes.ts's /workflows routes) ------------------------
-
-  async resolveWorkflowUi(id: string): Promise<Map<string, Buffer> | null> {
-    await this.ensure();
-    return this.workflowUi.get(id)?.files ?? null;
-  }
-
-  workflowUiRev(id: string): string | null {
-    return this.workflowUi.get(id)?.rev ?? null;
-  }
-
-  async installWorkflowUi(
-    id: string,
-    files: Record<string, string>,
-  ): Promise<{ rev: string; changed: boolean }> {
-    if (typeof files["index.html"] !== "string")
-      throw new Error("workflow UI manifest has no index.html");
-    for (const rel of Object.keys(files)) {
-      if (!isSafeRelPath(rel)) throw new Error(`unsafe path in workflow UI manifest: ${rel}`);
-    }
-    const gz = zlib.gzipSync(Buffer.from(JSON.stringify({ files })));
-    const rev = filesDigest(files).slice(0, 12);
-    const previous = this.workflowUi.get(id);
-    if (previous?.rev === rev) return { rev, changed: false };
-    const digest = rev;
-    const storeKey = sha1(id).slice(0, 16);
-    const dir = path.join(this.storeDir, "workflow-ui", storeKey);
-    await fsp.mkdir(dir, { recursive: true });
-    const artifact = `store/workflow-ui/${storeKey}/${digest}.webz`;
-    await fsp.writeFile(path.join(this.hmrDir, artifact), gz);
-    this.workflowUi.set(id, { rev, files: filesMapFromGzip(gz) });
-    // commitManifest takes a bare producer (see its own doc) — read the current
-    // manifest ourselves first so this stays a merge (only `workflowUi` moves;
-    // `platform`/`cli`/`web` ride through untouched).
-    const current = await this.readManifest();
-    await this.commitManifest(() => ({
-      ...current,
-      workflowUi: { ...(current.workflowUi ?? {}), [id]: { rev, artifact } },
-    }));
-    await this.pruneWorkflowUi(id, rev);
-    return { rev, changed: true };
-  }
-
-  async removeWorkflowUi(id: string): Promise<void> {
-    if (!this.workflowUi.delete(id)) return;
-    const current = await this.readManifest();
-    const workflowUi = { ...(current.workflowUi ?? {}) };
-    delete workflowUi[id];
-    await this.commitManifest(() => ({ ...current, workflowUi }));
-  }
-
-  private async pruneWorkflowUi(id: string, currentRev: string): Promise<void> {
-    const dir = path.join(this.storeDir, "workflow-ui", sha1(id).slice(0, 16));
-    let entries: Array<{ name: string; mtime: number }>;
-    try {
-      entries = await Promise.all(
-        (await fsp.readdir(dir))
-          .filter((name) => name.endsWith(".webz"))
-          .map(async (name) => ({ name, mtime: (await fsp.stat(path.join(dir, name))).mtimeMs })),
-      );
-    } catch {
-      return;
-    }
-    const keep = new Set(
-      entries
-        .sort((a, b) => b.mtime - a.mtime)
-        .slice(0, STORE_KEEP)
-        .map((entry) => entry.name),
-    );
-    keep.add(`${currentRev}.webz`);
-    await Promise.all(
-      entries
-        .filter((entry) => !keep.has(entry.name))
-        .map((entry) => fsp.rm(path.join(dir, entry.name), { force: true })),
-    );
   }
 
   // -- Persistence ----------------------------------------------------------
@@ -672,6 +598,13 @@ function filesDigest(files: Record<string, string>): string {
 function isSafeRelPath(rel: string): boolean {
   if (rel === "" || rel.startsWith("/") || rel.includes("\\")) return false;
   return rel.split("/").every((seg) => seg !== "" && seg !== "." && seg !== "..");
+}
+
+function withoutDynamicWorkflows(doc: Json): Json {
+  if (typeof doc !== "object" || doc === null || Array.isArray(doc)) return doc;
+  const children = doc.children;
+  if (typeof children !== "object" || children === null || Array.isArray(children)) return doc;
+  return { ...doc, children: { ...children, workflows: { items: {} } } };
 }
 
 /** Decodes a gzip(JSON.stringify({ files })) artifact into its manifest. */
