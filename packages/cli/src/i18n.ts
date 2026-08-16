@@ -341,7 +341,7 @@ const en: Messages = {
   serve: {
     serverDesc: "Start the Web service (HTTP API and the built-in frontend, same process)",
     webDesc: "Start the Web service and open the UI in a browser once it is ready",
-    port: "Listen port (falls back to the PORT env var, default 7364)",
+    port: "Listen port (falls back to the PORT env var, default 7376)",
     host: "Listen address (falls back to the HOST env var, default 127.0.0.1)",
     noOpen: "Do not open a browser automatically",
   },
@@ -578,7 +578,7 @@ const zh: Messages = {
   serve: {
     serverDesc: "启动 Web 服务（HTTP API 与内置前端，同一进程）",
     webDesc: "启动 Web 服务，就绪后用浏览器打开界面",
-    port: "监听端口（其次取环境变量 PORT，缺省 7364）",
+    port: "监听端口（其次取环境变量 PORT，缺省 7376）",
     host: "监听地址（其次取环境变量 HOST，缺省 127.0.0.1）",
     noOpen: "不自动打开浏览器",
   },
