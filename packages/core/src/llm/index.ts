@@ -16,6 +16,7 @@ export {
   isIncompleteStreamError,
   isRetryableError,
   isAuthenticationError,
+  isThinkingReplayRejection,
   mapThinkingLevel,
   toolDefinitionsToSchemas,
   buildUniConfig,
