@@ -121,4 +121,68 @@ fs.writeFileSync(path.join(binDir, "penguin.cmd"), windowsLauncherScript());
 
 fs.mkdirSync(path.join(stageDir, "minigit"), { recursive: true });
 
+// --- stage/payload: the same build as an install image -----------------------------------
+//
+// A second, independent output that has nothing to do with electron-builder: the tree
+// install.sh unpacks — `penguin/{bin,lib,lib/web}` plus a package manifest — so this machine
+// can hand its own build to a machine that has no PenguinHarness (the desktop app pushing a
+// server to an SSH target). Shaped like the universal release package: no `node/`, so the
+// far side needs system Node >= 24.
+//
+// It comes from its own `pnpm deploy` of the CLI rather than from stage/app above: that one
+// is the DESKTOP package's tree, an npm-package layout with the CLI nested under
+// node_modules, whereas the install image wants the CLI's own deploy at lib/ with
+// lib/dist/penguin.js as the entry. Re-deploying costs seconds and keeps the two shapes from
+// being derived from each other by hand.
+const payloadRoot = path.join(stageDir, "payload");
+const payloadDir = path.join(payloadRoot, "penguin");
+const payloadLib = path.join(payloadDir, "lib");
+fs.mkdirSync(payloadDir, { recursive: true });
+
+console.log("[stage] pnpm deploy --prod → stage/payload/penguin/lib");
+const payloadDeployArgs = [
+  "--config.node-linker=hoisted",
+  "--filter",
+  "@prismshadow/penguin-cli",
+  "deploy",
+  "--prod",
+  payloadLib,
+];
+execFileSync(
+  isWindows ? "pnpm.cmd" : "pnpm",
+  isWindows ? payloadDeployArgs.map((a) => `"${a}"`) : payloadDeployArgs,
+  { cwd: repoRoot, stdio: "inherit", env, shell: isWindows },
+);
+
+// Web assets live INSIDE lib/ for this layout; the launchers point PENGUIN_WEB_DIST there.
+fs.cpSync(webDist, path.join(payloadLib, "web"), { recursive: true, dereference: true });
+
+const { payloadLauncherScript, payloadLauncherCmd } = await import(
+  pathToFileURL(launcherModule).href
+);
+const payloadBin = path.join(payloadDir, "bin");
+fs.mkdirSync(payloadBin, { recursive: true });
+fs.writeFileSync(path.join(payloadBin, "penguin"), payloadLauncherScript(), { mode: 0o755 });
+fs.chmodSync(path.join(payloadBin, "penguin"), 0o755);
+fs.writeFileSync(path.join(payloadBin, "penguin.cmd"), payloadLauncherCmd());
+
+// The manifest install.sh checks against the target it expects; "universal" is the shape
+// with no bundled runtime.
+fs.writeFileSync(
+  path.join(payloadDir, "package-manifest.json"),
+  '{"schemaVersion":1,"target":"universal"}\n',
+);
+
+// Fail here rather than shipping an image whose entry or assets are missing.
+for (const [what, file] of [
+  ["payload CLI entry", path.join(payloadLib, "dist", "penguin.js")],
+  ["payload web assets", path.join(payloadLib, "web", "index.html")],
+]) {
+  if (!fs.existsSync(file)) {
+    console.error(`[stage] missing ${what} (${file}).`);
+    process.exit(1);
+  }
+}
+
 console.log("[stage] done:", appDir);
+console.log("[stage] done:", payloadDir);
