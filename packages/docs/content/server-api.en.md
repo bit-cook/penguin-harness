@@ -9,7 +9,7 @@ The PenguinHarness server exposes a same-origin HTTP API used by the bundled Web
 
 - Stack: Hono + @hono/node-server, requires Node >= 24;
 - Storage: SQLite (built-in `node:sqlite`, WAL mode) holds only indexes and aggregates — users, auth sessions, Project authorization, Agent / Session indexes, usage, UI preferences, error records, and Schedule state; all Agent, Trace, and Workspace data stays as files under `~/.penguin/data`, shared with the CLI / SDK — see the [Configuration Reference](/configuration);
-- Binding: defaults to `127.0.0.1:7364`, adjustable via the `PORT` / `HOST` environment variables;
+- Binding: defaults to `127.0.0.1:7376`, adjustable via the `PORT` / `HOST` environment variables;
 - Request bodies: writes accept JSON only (Content-Type check, one of the CSRF defenses), capped at 20MB — counted as the body is read, so a request that declares no length (chunked) is capped just the same;
 - Errors share a single shape:
 
@@ -42,7 +42,7 @@ packages/server/src
 # Use the initial password printed at first start (or your changed one).
 curl -c cookies.txt -H "Content-Type: application/json" \
   -d '{"userId":"admin","password":"penguin-1234"}' \
-  http://127.0.0.1:7364/api/auth/login
+  http://127.0.0.1:7376/api/auth/login
 ```
 
 ## Route Reference
@@ -241,7 +241,7 @@ Both the Files panel's rendered HTML view (an iframe) and "open in a new tab" go
 
 ```text
 GET  /api/sessions/:sessionId/files/preview-redirect?path=index.html
-302  Location: http://localhost:7364/preview/<token>/index.html
+302  Location: http://localhost:7376/preview/<token>/index.html
 GET  /preview/<token>/<relative path>          (unauthenticated; the token is the credential)
 ```
 

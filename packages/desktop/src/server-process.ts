@@ -11,8 +11,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { app, utilityProcess } from "electron";
 import type { UtilityProcess } from "electron";
+import { DEFAULT_SERVER_PORT } from "@prismshadow/penguin-core";
 import { osProxyEnv } from "./os-proxy.js";
-import { choosePort, readPreferredPort, rememberPreferredPort } from "./port-memory.js";
 import { appOriginFor, parsePortFile } from "./util.js";
 
 export interface EmbeddedServer {
@@ -105,21 +105,26 @@ async function waitForHttp(origin: string, exited: () => boolean): Promise<void>
 }
 
 /**
- * Starts the embedded server on the given data root — preferring last launch's port so
- * the app origin (and the renderer's origin-scoped localStorage: theme, language, …)
- * stays stable across launches, with PORT=0 as the fallback allocator — and a fresh
- * one-shot token. Resolves once HTTP answers. The caller attaches its own
- * `child.on("exit", …)` restart policy after this resolves.
+ * Starts the embedded server on the given data root at the well-known port
+ * (DEFAULT_SERVER_PORT) with a fresh one-shot token, resolving once HTTP answers. The
+ * caller attaches its own `child.on("exit", …)` restart policy after this resolves.
+ *
+ * The port is fixed rather than negotiated: the app origin — and with it the renderer's
+ * origin-scoped localStorage and cookies — is then the same on every launch by
+ * construction, which is what the old remembered-port dance was for, and it is the
+ * address a client probes to find this user's server at all. A port already in use is a
+ * hard failure here (the server exits without announcing): boot() checks for a live
+ * penguin server first and attaches to it instead, so reaching this path with 7376 taken
+ * means something else owns it, which is worth an error rather than a silent second
+ * origin.
  */
 export async function startEmbeddedServer(opts: {
   dataRoot: string;
   portFile: string;
-  preferredPortFile: string;
   log: (chunk: string) => void;
 }): Promise<EmbeddedServer> {
   const token = randomBytes(32).toString("base64url");
   fs.rmSync(opts.portFile, { force: true });
-  const requestedPort = await choosePort(readPreferredPort(opts.preferredPortFile));
   const child = utilityProcess.fork(serverEntryPath(), [], {
     serviceName: "penguin-server",
     stdio: "pipe",
@@ -132,7 +137,7 @@ export async function startEmbeddedServer(opts: {
       ...(await osProxyEnv()),
       PENGUIN_HOME: opts.dataRoot,
       HOST: "127.0.0.1",
-      PORT: String(requestedPort),
+      PORT: String(DEFAULT_SERVER_PORT),
       PENGUIN_DESKTOP_TOKEN: token,
       PENGUIN_PORT_FILE: opts.portFile,
     },
@@ -144,8 +149,9 @@ export async function startEmbeddedServer(opts: {
     exited = true;
   });
 
+  // The announcement still gates readiness (it proves the listener bound) even though the
+  // number is known up front.
   const port = await waitForPortFile(opts.portFile, () => exited);
-  rememberPreferredPort(opts.preferredPortFile, port);
   const origin = appOriginFor(port);
   await waitForHttp(origin, () => exited);
   return { child, origin, token };
