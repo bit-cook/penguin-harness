@@ -9,7 +9,7 @@ import type { ReactNode } from "react";
 import type { UserInfo } from "@prismshadow/penguin-server/api";
 import * as api from "../api/endpoints";
 import { ApiError, setUnauthorizedHandler } from "../api/client";
-import { rememberAccount } from "../lib/known-accounts";
+import { currentMachine, rememberAccount } from "../lib/known-accounts";
 
 interface AuthContextValue {
   /** undefined = initializing; null = not logged in. */
@@ -79,13 +79,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  // Remember every account that signs in on this browser (ids only, no credentials —
+  // Remember every account that signs in from this browser (ids only, no credentials —
   // known-accounts.ts): after "switch account" the login page offers them as one-click
-  // prefills. Hooked to the resolved user rather than to login(), so all three ways a
-  // session materializes are covered at once — the mount-time /api/me, a fresh login,
-  // and refresh() — and a repeat of the same account writes nothing.
+  // prefills. Tagged with the machine it signed in on, so a browser that reaches two
+  // hosts through the same local origin keeps their accounts apart. Hooked to the
+  // resolved user rather than to login(), so all three ways a session materializes are
+  // covered at once — the mount-time /api/me, a fresh login, and refresh() — and a
+  // repeat of the same account writes nothing.
   useEffect(() => {
-    if (user) rememberAccount(user.userId);
+    if (user) rememberAccount({ machine: currentMachine(), userId: user.userId });
   }, [user]);
 
   const login = useCallback(async (userId: string, password: string) => {
