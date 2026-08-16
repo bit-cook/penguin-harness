@@ -1,9 +1,13 @@
 /**
- * Business-platform proof: terminals surviving a hot swap via resource
- * claiming, exercised through the repo's own packaged platform (not the
- * standalone fixture bundle) — plus the legacy /terminals routes vs. the
- * generic /platform/call dispatch route landing on the identical
- * underlying api.terminals() collection.
+ * Business-platform proof: terminals surviving a hot swap via resource claiming,
+ * exercised through the repo's own packaged platform (not the standalone fixture
+ * bundle).
+ *
+ * The dispatch-equivalence case that used to live here went with POST
+ * /api/hmr/platform/call: a business API is no longer reached by method name through
+ * an RPC envelope but served by the platform itself over the HTTP seam
+ * (src/hmr/http-seam.ts), and /terminals* is the last business surface still wired
+ * into the runtime's own routes.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import fs from "node:fs/promises";
@@ -115,31 +119,5 @@ describe("hot update: business platform (terminals)", () => {
       const r = await api.get(`/api/hmr/terminals/${id}`);
       return ((await r.json()) as { output: string }).output.includes("after-upgrade");
     });
-  });
-
-  it("createTerminal via generic dispatch is equivalent to the legacy /terminals route", async () => {
-    // Legacy route: a dedicated handler wired directly to inst.api.createTerminal.
-    const legacy = await api.post("/api/hmr/terminals", { command: "cat" });
-    expect(legacy.status).toBe(201);
-    const { id: legacyId } = (await legacy.json()) as { id: string };
-
-    // Generic dispatch: the exact same method, reached by name instead of by route.
-    const dispatched = await api.post("/api/hmr/platform/call", {
-      method: "createTerminal",
-      args: ["cat", "."],
-    });
-    expect(dispatched.status).toBe(200);
-    const { result } = (await dispatched.json()) as { result: { id: string } };
-
-    // Both landed on the same underlying api.terminals() collection: the
-    // legacy listing route sees both, proving dispatch didn't take a
-    // different code path.
-    const list = (await (await api.get("/api/hmr/terminals")).json()) as {
-      terminals: { id: string; alive: boolean }[];
-    };
-    const ids = list.terminals.map((term) => term.id);
-    expect(ids).toContain(legacyId);
-    expect(ids).toContain(result.id);
-    expect(list.terminals.find((term) => term.id === result.id)?.alive).toBe(true);
   });
 });
