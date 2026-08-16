@@ -22,9 +22,12 @@
  * own routes do and answers null for the ones it does not own, so adding or
  * changing an endpoint needs no runtime change.
  */
+import { resolveRoot } from "@prismshadow/penguin-core";
 import type { Impl, Json, Park } from "@prismshadow/penguin-core/kernel";
 import { defineIface, schema, type } from "@prismshadow/penguin-core/kernel";
 import { ensureCliOnPath } from "./agent-cli-path.js";
+import { machinesHttp } from "./machines/http.js";
+import { MachinesService } from "./machines/service.js";
 
 export interface PlatformApi extends Park {
   info(): Json;
@@ -47,7 +50,17 @@ export const platformImpl: Impl<PlatformApi, PlatformCtx> = {
     // already-deployed machines via a normal hot push instead of a rebuild. Idempotent,
     // so re-running it on every create() (including hot swaps) is harmless.
     ensureCliOnPath();
+    // "Which machines can this window switch to, and how" is policy of the same kind —
+    // the earlier home for it was the Electron shell, which was the layer mistake this
+    // README exists to prevent. Living here, the whole capability (host list, probe,
+    // auto-install, tunnel) reaches deployed machines by push; tunnels it spawned before
+    // a swap are re-adopted through the state file, not held objects.
+    const machines = new MachinesService(process.env.PENGUIN_HOME ?? resolveRoot());
+    const machinesRoutes = machinesHttp(machines, process.env.PENGUIN_HOME ?? resolveRoot());
+    // `http` rides beside the iface methods (not IN them: a Request/Response pair is not
+    // Json) — the seam calls it in-process on the booted object. See ../hmr/http-seam.ts.
     return {
+      http: (request: Request) => machinesRoutes(request),
       park: () => ({ motd: context.motd }),
       info: () => ({
         impl: "packaged",
