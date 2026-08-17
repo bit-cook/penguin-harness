@@ -1,6 +1,6 @@
 # Unreleased
 
-- [2026-08-16] **Machines**: the login page can point the window at a machine from `~/.ssh/config` — the server probes it, installs or updates this build there automatically, starts its server, opens an SSH tunnel (local port = remote port, remembered per machine) and lands on that server's own login page; agents and workspaces then run on that machine. The capability is platform code behind `/api/machines` (hot-pushable); the shell only permits navigating between loopback origins. Supersedes the desktop "Install Server on Remote Host" menu. ([details](2026-08-16-machines.md))
+- [2026-08-16] **Machines**: the login page can point the app at a machine from `~/.ssh/config` — the server probes it, installs or updates this build there automatically, starts its server, opens an SSH tunnel and becomes the ACTIVE server: the window stays on the local origin, and every API/SSE call rides `/server/<id>/api/…` through a local proxy (cookies namespaced per machine, streaming intact). Agents and workspaces then run on that machine. Entirely platform code (hot-pushable); no shell change of any kind. Supersedes the desktop "Install Server on Remote Host" menu. ([details](2026-08-16-machines.md))
 
 - [2026-08-15] The desktop build also stages an install image (`stage/payload/penguin/{bin,lib,lib/web}`), so a machine with PenguinHarness can install its own build onto one without. ([details](2026-08-15-desktop-payload.md))
 
