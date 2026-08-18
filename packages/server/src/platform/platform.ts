@@ -36,8 +36,28 @@ import { MachinesService } from "./machines/service.js";
 import type { TerminalApi } from "./terminal.js";
 import { TerminalIface, terminalImpl } from "./terminal.js";
 import { spawnShellResource } from "../hmr/resources.js";
+import { loadConfiguredPlugins } from "../plugins/loader.js";
 import type { PenguinInterface } from "./plugin.js";
 import { pluginHost } from "./plugin.js";
+
+/**
+ * Configured plugins, loaded once per process and memoized: a hot swap re-delivers
+ * their hooks to the fresh App (that is the host's job) but must not import or
+ * re-register them. There are no built-in plugins registered here — which plugins
+ * exist is the deployment's plugins.json, not this file's import list.
+ */
+let configuredPlugins: Promise<void> | null = null;
+function ensureConfiguredPlugins(root: string): Promise<void> {
+  configuredPlugins ??= loadConfiguredPlugins(root).then((result) => {
+    for (const { plugin } of result.loaded) pluginHost.use(plugin);
+    for (const [specifier, reason] of result.failed) {
+      // Non-fatal by design: the capability a plugin would have provided stays
+      // unavailable rather than the whole platform failing to boot.
+      console.warn(`[plugins] skipped ${specifier}: ${reason}`);
+    }
+  });
+  return configuredPlugins;
+}
 import type { WorkflowApi, WorkflowRegistry, WorkflowTool } from "./workflow.js";
 import { WorkflowIface, workflowImpl } from "./workflow.js";
 
@@ -70,7 +90,7 @@ export const PlatformIface = defineIface<PlatformApi, PlatformCtx>({
 
 export const platformImpl: Impl<PlatformApi, PlatformCtx> = {
   children: { terminals: terminalImpl, workflows: workflowImpl },
-  create(ctx, context, children) {
+  async create(ctx, context, children) {
     // "What PATH does the agent's shell see" is policy (see ../hmr/README.md), not
     // mechanism: it belongs here, in-process at platform boot, rather than in the
     // Electron shell that forks the server — that's what makes the fix reach
@@ -117,6 +137,9 @@ export const platformImpl: Impl<PlatformApi, PlatformCtx> = {
         return () => tools.delete(tool.name);
       },
     };
+    // Plugins are configuration: load whatever plugins.json names before offering the
+    // interface, so a configured plugin is registered by the time hooks are delivered.
+    await ensureConfiguredPlugins(process.env.PENGUIN_HOME ?? resolveRoot());
     const pluginIface: PenguinInterface = { workflow: new Map(), tool: new Map() };
     pluginHost.createApp(pluginIface);
     pluginHost.emit("create", {
