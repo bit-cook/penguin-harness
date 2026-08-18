@@ -8,7 +8,7 @@
  */
 import type { Impl, Park } from "@prismshadow/penguin-core/kernel";
 import { defineIface, schema, type } from "@prismshadow/penguin-core/kernel";
-import type { ShellProcResource } from "../hmr/resources.js";
+import type { ShellProcResource } from "./shell-resource.js";
 
 export interface TerminalApi extends Park {
   write(data: string): void;

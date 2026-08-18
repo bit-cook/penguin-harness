@@ -25,7 +25,6 @@ import type { AppDeps } from "../app.js";
 import { authMiddleware } from "../auth/middleware.js";
 import type { AppEnv } from "../auth/middleware.js";
 import { HttpError } from "../http/errors.js";
-import type { ShellProcResource } from "./resources.js";
 
 /** Bind addresses considered safe by default; anything else needs HTTPS. */
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
@@ -307,19 +306,12 @@ export function hmrRoutes(deps: AppDeps): Hono<AppEnv> {
   });
 
   routes.delete("/terminals/:id", async (c) => {
-    const id = c.req.param("id");
     const inst = await hmr.ensure();
-    const terminals = inst.api.terminals();
-    const t = terminals.get(id);
-    if (t === undefined) throw new HttpError(404, "not_found", "No such terminal.");
-    // Closing a terminal is user intent to end the process: kill and release
-    // the runtime resource, then remove the node.
-    const procId = (t.park() as { procId?: string }).procId;
-    if (procId !== undefined) {
-      hmr.resources.claim<ShellProcResource>(procId)?.kill();
-      hmr.resources.release(procId);
+    // What closing costs — killing the process, dropping its resource — is the
+    // platform's business; the route only carries the request.
+    if (!inst.api.closeTerminal(c.req.param("id"))) {
+      throw new HttpError(404, "not_found", "No such terminal.");
     }
-    terminals.remove(id);
     return c.json({ ok: true });
   });
 

@@ -35,13 +35,16 @@ import { machinesProxy } from "./machines/proxy.js";
 import { MachinesService } from "./machines/service.js";
 import type { TerminalApi } from "./terminal.js";
 import { TerminalIface, terminalImpl } from "./terminal.js";
-import { spawnShellResource } from "../hmr/resources.js";
+import type { ShellProcResource } from "./shell-resource.js";
+import { spawnShellResource } from "./shell-resource.js";
 import type { WorkflowApi, WorkflowRegistry, WorkflowTool } from "./workflow.js";
 import { WorkflowIface, workflowImpl } from "./workflow.js";
 
 export interface PlatformApi extends Park {
   info(): Json;
   createTerminal(command: string, cwd: string): Promise<{ id: string }>;
+  /** Ends the process, drops its runtime resource, and removes the node. */
+  closeTerminal(id: string): boolean;
   terminals(): KeyedHandle<TerminalApi>;
   workflows(): KeyedHandle<WorkflowApi>;
   workflowTools(): Array<{ workflowId: string; name: string; description: string }>;
@@ -58,6 +61,7 @@ export const PlatformIface = defineIface<PlatformApi, PlatformCtx>({
     "park",
     "info",
     "createTerminal",
+    "closeTerminal",
     "terminals",
     "workflows",
     "workflowTools",
@@ -123,6 +127,19 @@ export const platformImpl: Impl<PlatformApi, PlatformCtx> = {
         spawnShellResource(ctx.resources, `proc_${id}`, command, cwd);
         await terminals.add(id, { procId: `proc_${id}`, command, cwd });
         return { id };
+      },
+      closeTerminal(id) {
+        const terminal = terminals.get(id);
+        if (terminal === undefined) return false;
+        // Closing is user intent to end the process, so the resource goes too —
+        // unlike a swap, where it deliberately outlives the node.
+        const { procId } = terminal.park() as { procId?: string };
+        if (procId !== undefined) {
+          ctx.resources.claim<ShellProcResource>(procId)?.kill();
+          ctx.resources.release(procId);
+        }
+        terminals.remove(id);
+        return true;
       },
       terminals: () => terminals,
       workflows: () => workflows,
