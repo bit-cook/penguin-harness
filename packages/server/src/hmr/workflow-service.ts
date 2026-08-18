@@ -122,6 +122,48 @@ export class WorkflowService {
     return this.active.has(agentKey(projectId, agentId));
   }
 
+  /**
+   * Re-seeds every active slot after a platform swap (the upgrade route calls this on
+   * success). The swap migrates the workflow NODES — script and state ride the parked
+   * tree — but the tool registry lives in the new create()'s closure and starts empty,
+   * and each node's runCtx binding died with the old instance: without this, a push
+   * leaves workflowTools() empty and run() throwing "workflow is not activated" while
+   * the tree looks intact. activate() cannot repair it either — its refcount keeps it
+   * from re-injecting an already-active Agent.
+   *
+   * Degrades honestly at the edges: a pushed platform without workflow support at all
+   * is skipped wholesale (its workflows come back with the next workflow-aware push),
+   * and a node the migration dropped is re-injected from the Agent folder — the state
+   * file from the last park, since the in-tree state went down with the drop. The
+   * re-injections run after the mutate (replace() takes its own mutate turn; nesting
+   * it would deadlock the host's op queue).
+   */
+  async reseedActive(): Promise<void> {
+    return this.serial(async () => {
+      const missing: Array<{ entry: ActiveAgent; workflowId: string }> = [];
+      await this.hmr.mutate(async (inst) => {
+        const api: Partial<PlatformApi> = inst.api;
+        if (typeof api.workflows !== "function" || typeof api.reseedWorkflow !== "function") {
+          return;
+        }
+        for (const entry of this.active.values()) {
+          for (const slotId of entry.slots) {
+            if (inst.api.workflows().get(slotId) === undefined) {
+              missing.push({ entry, workflowId: slotId.slice(slotId.indexOf("/") + 1) });
+            } else {
+              inst.api.reseedWorkflow(slotId, {
+                runAgent: (prompt) => this.runAgent(entry.projectId, entry.agentId, prompt),
+              });
+            }
+          }
+        }
+      }, false);
+      for (const { entry, workflowId } of missing) {
+        await this.replace(entry, workflowId);
+      }
+    });
+  }
+
   async install(args: WorkflowInstall): Promise<WorkflowSummary | null> {
     return this.serial(() => this.doInstall(args));
   }
