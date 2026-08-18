@@ -44,6 +44,7 @@ import type {
   CompactAvailability,
   OmniMessage,
   ProxyEnvPolicy,
+  SpawnConfiner,
   SessionMetaPayload,
   SessionTitleResult,
   TextPayload,
@@ -136,7 +137,10 @@ export interface SessionLoader {
 export function createCoreSessionLoader(
   root: string,
   sources?: SessionSources,
-  opts: { proxyEnv?: () => ProxyEnvPolicy | null } = {},
+  opts: {
+    proxyEnv?: () => ProxyEnvPolicy | null;
+    confineSpawn?: () => SpawnConfiner | null;
+  } = {},
 ): SessionLoader {
   return {
     async load(row: SessionRow): Promise<RuntimeSession> {
@@ -145,6 +149,7 @@ export function createCoreSessionLoader(
         projectId: row.projectId,
         agentId: row.agentId,
         ...(opts.proxyEnv ? { proxyEnv: opts.proxyEnv } : {}),
+        ...(opts.confineSpawn ? { confineSpawn: opts.confineSpawn } : {}),
       });
       const located = await findLatestTraceFile(
         tracesDir(root, row.projectId, row.agentId),

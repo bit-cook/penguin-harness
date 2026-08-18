@@ -35,15 +35,17 @@ import { machinesProxy } from "./machines/proxy.js";
 import { MachinesService } from "./machines/service.js";
 import type { TerminalApi } from "./terminal.js";
 import { TerminalIface, terminalImpl } from "./terminal.js";
-import { spawnShellResource } from "../hmr/resources.js";
-import { loadConfiguredPlugins } from "../plugins/loader.js";
+import { SPAWN_CONFINER_RESOURCE, spawnShellResource } from "../hmr/resources.js";
 import type { PenguinInterface } from "./plugin.js";
 import { pluginHost } from "./plugin.js";
+import { loadConfiguredPlugins } from "../plugins/loader.js";
+import type { SandboxProviderSource } from "../sandbox/index.js";
+import { SandboxService } from "../sandbox/index.js";
 
 /**
  * Configured plugins, loaded once per process and memoized: a hot swap re-delivers
  * their hooks to the fresh App (that is the host's job) but must not import or
- * re-register them. There are no built-in plugins registered here — which plugins
+ * re-register them. There are no built-in plugins to register here — which backends
  * exist is the deployment's plugins.json, not this file's import list.
  */
 let configuredPlugins: Promise<void> | null = null;
@@ -52,7 +54,8 @@ function ensureConfiguredPlugins(root: string): Promise<void> {
     for (const { plugin } of result.loaded) pluginHost.use(plugin);
     for (const [specifier, reason] of result.failed) {
       // Non-fatal by design: the capability a plugin would have provided stays
-      // unavailable rather than the whole platform failing to boot.
+      // unavailable (the sandbox service then fails closed for a confining policy)
+      // rather than the whole platform failing to boot.
       console.warn(`[plugins] skipped ${specifier}: ${reason}`);
     }
   });
@@ -70,12 +73,32 @@ export interface PlatformApi extends Park {
   reseedWorkflow(id: string, runCtx: import("./workflow.js").WorkflowRunCtx): void;
 }
 
-export type PlatformCtx = { motd: string };
+import type { SandboxSettings } from "../sandbox/index.js";
+
+export type PlatformCtx = {
+  motd: string;
+  /**
+   * Active sandbox settings — parked state, not service memory: a hot swap constructs
+   * a fresh SandboxService, and without this field the swap would silently reset a
+   * confining deployment to unconfined. Optional so documents parked before the field
+   * existed restore as the default (confinement off).
+   */
+  sandbox?: SandboxSettings;
+};
 
 export const PlatformIface = defineIface<PlatformApi, PlatformCtx>({
   name: "platform",
   version: 1,
-  context: schema<PlatformCtx>(type({ motd: "string" })),
+  context: schema<PlatformCtx>(
+    type({
+      motd: "string",
+      "sandbox?": {
+        mode: "'read-only' | 'workspace-write' | 'danger-full-access'",
+        "network?": "'none'",
+        "maskPaths?": "string[]",
+      },
+    }),
+  ),
   methods: [
     "park",
     "info",
@@ -137,15 +160,47 @@ export const platformImpl: Impl<PlatformApi, PlatformCtx> = {
         return () => tools.delete(tool.name);
       },
     };
-    // Plugins are configuration: load whatever plugins.json names before offering the
-    // interface, so a configured plugin is registered by the time hooks are delivered.
+    // Plugins are configuration: load whatever plugins.json names before offering
+    // the interface, so a configured backend is registered by the time the sandbox
+    // service reads the registry below.
     await ensureConfiguredPlugins(process.env.PENGUIN_HOME ?? resolveRoot());
-    const pluginIface: PenguinInterface = { workflow: new Map(), tool: new Map() };
+    // Sandbox backends arrive as plugins through iface.sandbox (see plugin.ts);
+    // duplicates are refused, and the service routes policies by capability.
+    const sandboxProviders = new Map<string, SandboxProviderSource>();
+    const pluginIface: PenguinInterface = {
+      workflow: new Map(),
+      tool: new Map(),
+      sandbox: {
+        registerProvider(name, provider) {
+          if (sandboxProviders.has(name)) {
+            throw new Error(`sandbox provider '${name}' is already registered`);
+          }
+          sandboxProviders.set(name, provider);
+        },
+      },
+    };
     pluginHost.createApp(pluginIface);
+    // "Which commands run confined, under which policy, by which backend" is policy of
+    // the same kind as the rest of this file: the whole sandbox capability (../sandbox/
+    // — its interface, backends and settings) reaches deployed machines by push. Only
+    // core's spawn seam and this resource handoff are mechanism. The confiner is
+    // registered overwrite-style and never released on park (see the resource id's
+    // doc), so a hot swap never opens an unconfined gap.
+    const sandbox = new SandboxService(sandboxProviders);
+    // Rehydrate the parked settings (state rides the swap): without this, every hot
+    // push would construct a fresh service on defaults and silently un-confine a
+    // deployment that had confinement on. Documents parked before the field existed
+    // restore with it absent — the default (confinement off) — by design.
+    if (context.sandbox !== undefined) sandbox.configure(context.sandbox);
+    ctx.resources.register(SPAWN_CONFINER_RESOURCE, sandbox.confiner());
     pluginHost.emit("create", {
       workflows,
       terminals,
       createTerminal,
+      sandbox: {
+        configure: (settings) => sandbox.configure(settings),
+        settings: () => sandbox.currentSettings(),
+      },
       shell: {
         // A raw shell is the same runtime-owned live resource a terminal wraps —
         // minus the identity node. It survives swaps in the Resources registry and
@@ -177,7 +232,17 @@ export const platformImpl: Impl<PlatformApi, PlatformCtx> = {
     return {
       http: async (request: Request) =>
         (await machinesRoutes(request)) ?? (await serverProxy(request)),
-      park: () => ({ motd: context.motd }),
+      park: () => {
+        // Omitted while settings are the pristine default (see parkedSettings): a
+        // default deployment keeps parking { motd }, compatible with any bundle's
+        // schema; once confinement is configured, pushing a sandbox-ignorant bundle
+        // blocks rather than silently un-confining.
+        const parkedSandbox = sandbox.parkedSettings();
+        return {
+          motd: context.motd,
+          ...(parkedSandbox !== undefined ? { sandbox: parkedSandbox } : {}),
+        };
+      },
       info: () => ({
         impl: "packaged",
         ifaceVersion: PlatformIface.version,

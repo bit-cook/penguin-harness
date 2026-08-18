@@ -64,6 +64,12 @@ applyProxySettings({
   proxyUrl: deps.serverSettingsRepo.getProxyUrl(),
 });
 const app = createApp(deps);
+// Eager platform boot (ensure() is otherwise lazy): the platform registers runtime
+// resources at create() — among them the spawn confiner — and nothing else guarantees
+// it has booted before the first command spawn on a headless path. Awaited before
+// listen, so no session can exist, and therefore no spawn can claim an empty
+// confinement slot, while the platform is still unbooted.
+await deps.hmr.ensure();
 
 // Built-in admin seed (idempotent): creates admin and adopts default_project when the
 // users table is empty. The returned initial password (random unless pinned via

@@ -14,7 +14,7 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import type { DatabaseSync } from "node:sqlite";
-import type { ProxyEnvPolicy } from "@prismshadow/penguin-core";
+import type { ProxyEnvPolicy, SpawnConfiner } from "@prismshadow/penguin-core";
 import type { ServerConfig } from "./config.js";
 import { mergedNoProxy } from "./net/proxy.js";
 import { openDatabase } from "./db/database.js";
@@ -85,6 +85,7 @@ import { UpdateCheckService } from "./services/update-check-service.js";
 import { UsageService } from "./services/usage-service.js";
 import { WorkspaceFilesService } from "./services/workspace-files-service.js";
 import { HmrHost } from "./hmr/host.js";
+import { SPAWN_CONFINER_RESOURCE } from "./hmr/resources.js";
 import { WorkflowService } from "./hmr/workflow-service.js";
 import { hmrRoutes } from "./hmr/routes.js";
 import { platformHttpSeam } from "./hmr/http-seam.js";
@@ -236,6 +237,14 @@ export function buildAppDeps(config: ServerConfig, overrides: BuildDepsOverrides
     overrides.titles ??
     new TitleGenerator({ sessions: sessionsRepo, channels, recorder, errors, log });
   const hmr = new HmrHost(config.root);
+  // Spawn-confinement handoff (mechanism only): the booted platform registers its
+  // confiner as a runtime resource (see SPAWN_CONFINER_RESOURCE); this getter claims it
+  // per spawn and transports it into core untouched. Like proxyEnv it is threaded
+  // through BOTH core entry paths — the loader (resume/self-heal) and SessionService
+  // (creation) — and re-read at every command spawn, so a platform push swapping the
+  // confiner reaches Sessions that are already loaded.
+  const confineSpawn = (): SpawnConfiner | null =>
+    hmr.resources.claim<SpawnConfiner>(SPAWN_CONFINER_RESOURCE) ?? null;
   const workflows = new WorkflowService(
     config.root,
     hmr,
@@ -247,7 +256,9 @@ export function buildAppDeps(config: ServerConfig, overrides: BuildDepsOverrides
   const manager = new SessionManager({
     sessions: sessionsRepo,
     channels,
-    loader: overrides.loader ?? createCoreSessionLoader(config.root, sessionSources, { proxyEnv }),
+    loader:
+      overrides.loader ??
+      createCoreSessionLoader(config.root, sessionSources, { proxyEnv, confineSpawn }),
     sources: sessionSources,
     recorder,
     errors,
@@ -307,6 +318,7 @@ export function buildAppDeps(config: ServerConfig, overrides: BuildDepsOverrides
     sources: sessionSources,
     traceIndex,
     proxyEnv,
+    confineSpawn,
   });
   // Schedule scheduler: active only while the server is running. Only
   // assembled here; start() is called in index.ts (tests drive it via tickOnce, no real timer).

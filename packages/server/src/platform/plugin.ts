@@ -26,6 +26,7 @@
  *     assembled) is the only one the platform emits yet.
  */
 import type { KeyedHandle } from "@prismshadow/penguin-core/kernel";
+import type { SandboxProviderSource, SandboxSettings } from "../sandbox/index.js";
 import type { TerminalApi } from "./terminal.js";
 import type { WorkflowApi } from "./workflow.js";
 
@@ -59,6 +60,31 @@ export interface ShellCapability {
   spawn(cmd: string, opts: { cwd: string }): ShellHandle;
 }
 
+/**
+ * Sandbox backend registration — the floor where plugins are PROVIDERS. Backends
+ * register against the harness's own sandbox interface (../sandbox/): the DSH adaptor
+ * and penguin-bwrap are the two built-ins, and a third-party backend enters exactly
+ * the same way. A backend declares which dimensions it implements (`network` and
+ * `mask-paths` are optional implementations; declaring nothing means filesystem only),
+ * and the service ROUTES each policy to a backend implementing what it requires — so
+ * an unimplemented dimension can never be silently ignored. A backend may be handed in
+ * as a promise: loading is asynchronous (dynamic imports, probes), and the service
+ * fails closed while a load is pending or failed.
+ */
+export interface SandboxProviderRegistry {
+  registerProvider(name: string, provider: SandboxProviderSource): void;
+}
+
+/**
+ * The sandbox config surface on the instance view: what a deployment (or a plugin
+ * reacting to an event) uses to flip confinement. Settings park with the platform
+ * context, so they survive hot swaps.
+ */
+export interface SandboxControl {
+  configure(settings: SandboxSettings): void;
+  settings(): SandboxSettings;
+}
+
 /** An INSTANCE of the harness: platform members flattened, workflow instances at `workflows`. */
 export interface PenguinContext {
   /** Workflow instances (the platform's keyed workflow nodes). */
@@ -74,6 +100,8 @@ export interface PenguinContext {
   shell: ShellCapability;
   /** Create a terminal — the platform's createTerminal, flattened. */
   createTerminal(command: string, cwd: string): Promise<{ id: string }>;
+  /** The sandbox config surface (see {@link SandboxControl}). */
+  sandbox: SandboxControl;
   /** The tools currently registered on this App instance (workflow tools today). Live view. */
   tools(): Array<{ workflowId: string; name: string; description: string }>;
   /**
@@ -92,6 +120,8 @@ export interface PenguinContext {
 export interface PenguinInterface {
   /** Workflow factories, keyed by name. */
   workflow: Map<string, WorkflowFactory>;
+  /** Sandbox provider registration (see {@link SandboxProviderRegistry}). */
+  sandbox: SandboxProviderRegistry;
   /** Tool factories, keyed by name — floor 4, RESERVED (see {@link ToolFactory}). */
   tool: Map<string, ToolFactory>;
 }

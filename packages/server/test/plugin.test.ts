@@ -5,7 +5,8 @@
  */
 import { describe, expect, it } from "vitest";
 import { boot, initialDoc } from "@prismshadow/penguin-core/kernel";
-import { HotResources } from "../src/hmr/resources.js";
+import type { SpawnConfiner } from "@prismshadow/penguin-core";
+import { HotResources, SPAWN_CONFINER_RESOURCE } from "../src/hmr/resources.js";
 import { PluginHost } from "../src/platform/plugin.js";
 import type { PenguinContext, PenguinInterface } from "../src/platform/plugin.js";
 import { pluginHost } from "../src/platform/plugin.js";
@@ -29,7 +30,11 @@ describe("plugin host", () => {
     });
     host.use({ subscribe: (eventName) => log.push(`b:${eventName}`) });
 
-    const iface: PenguinInterface = { workflow: new Map(), tool: new Map() };
+    const iface: PenguinInterface = {
+      workflow: new Map(),
+      tool: new Map(),
+      sandbox: { registerProvider: () => {} },
+    };
     host.createApp(iface);
     const ctx = { workflows: {}, terminals: {} } as unknown as PenguinContext;
     host.emit("create", ctx);
@@ -44,7 +49,11 @@ describe("plugin host", () => {
     const host = new PluginHost();
     host.use({});
     expect(() => {
-      host.createApp({ workflow: new Map(), tool: new Map() });
+      host.createApp({
+        workflow: new Map(),
+        tool: new Map(),
+        sandbox: { registerProvider: () => {} },
+      });
       host.emit("create", {} as PenguinContext);
     }).not.toThrow();
   });
@@ -55,7 +64,23 @@ describe("plugin seam on the real platform", () => {
     const events: Array<{ name: string; ctx: PenguinContext }> = [];
     let createApps = 0;
     pluginHost.use({
-      onCreateApp: () => createApps++,
+      onCreateApp: (iface) => {
+        createApps++;
+        // Provider registration is per-App: a fresh name registers, a duplicate is
+        // refused. (The built-in dsh-local plugin registered first, so it stays the
+        // active provider — first registered wins.)
+        iface.sandbox.registerProvider("test-fake", {
+          confine: (argv) => ({
+            argv: ["fake", ...argv],
+            enforcement: "full",
+            denialSignatures: [],
+            runnerFailureRules: [],
+          }),
+        });
+        expect(() => iface.sandbox.registerProvider("test-fake", { confine: null! })).toThrow(
+          /already registered/,
+        );
+      },
       subscribe: (name, ctx) => events.push({ name, ctx }),
     });
 
@@ -83,6 +108,24 @@ describe("plugin seam on the real platform", () => {
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
       shell.kill();
+
+      // The sandbox config surface: settings start at the default, a plugin can flip
+      // them, the flip reaches the live confiner (never a silent passthrough under a
+      // confining mode), and the new settings park with the tree.
+      expect(ctx.sandbox.settings()).toEqual({ mode: "danger-full-access" });
+      ctx.sandbox.configure({ mode: "read-only" });
+      expect(ctx.sandbox.settings()).toEqual({ mode: "read-only" });
+      const confiner = resources.claim<SpawnConfiner>(SPAWN_CONFINER_RESOURCE);
+      let result: readonly string[] | null = null;
+      try {
+        result = confiner!(["bash", "-lc", "true"], { cwd: "/w", workspaceDir: "/w" });
+      } catch {
+        result = null;
+      }
+      expect(result).not.toEqual(["bash", "-lc", "true"]);
+      expect((await instA.api.park()) as object).toMatchObject({
+        sandbox: { mode: "read-only" },
+      });
 
       // Reserved floors: tool factories on the definition view, agent invocation on
       // the instance view — placeholders that answer honestly until they land.

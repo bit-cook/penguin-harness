@@ -11,6 +11,18 @@ import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import type { Resources } from "@prismshadow/penguin-core/kernel";
 
+/**
+ * Resource id under which the booted platform registers its spawn confiner (core's
+ * `SpawnConfiner`): the argv rewrite the command-session seam consults on every spawn.
+ * Pure mechanism on this side — the runtime transports the claimed value into core
+ * without interpreting it; whether and how commands are confined is platform policy
+ * (see ../platform/sandbox.ts). Registered overwrite-style at platform boot and
+ * deliberately NOT released on park, so the previous platform's confiner (a pure
+ * closure) keeps serving spawns through a swap's freeze window instead of opening an
+ * unconfined gap.
+ */
+export const SPAWN_CONFINER_RESOURCE = "spawn-confiner";
+
 /** Output buffer cap per process (chunks are dropped oldest-first past this). */
 const MAX_BUFFER_BYTES = 128 * 1024;
 

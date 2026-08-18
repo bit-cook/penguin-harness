@@ -13,8 +13,22 @@ export type {
   PenguinContext,
   PenguinInterface,
   RawPlugin,
+  SandboxControl,
+  SandboxProviderRegistry,
   ShellCapability,
   ShellHandle,
   ToolFactory,
   WorkflowFactory,
 } from "./platform/plugin.js";
+export type {
+  ConfinedArgv,
+  ConfinedSandboxMode,
+  RunnerFailureRule,
+  SandboxDimension,
+  SandboxEnforcement,
+  SandboxMode,
+  SandboxPolicy,
+  SandboxProvider,
+  SandboxProviderSource,
+  SandboxSettings,
+} from "./sandbox/types.js";
