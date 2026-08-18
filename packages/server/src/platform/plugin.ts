@@ -33,6 +33,14 @@ import type { WorkflowApi } from "./workflow.js";
 export type WorkflowFactory = unknown;
 
 /**
+ * A tool factory — floor 4, RESERVED. Placeholder like WorkflowFactory: the shape
+ * lands with the first plugin-provided tool. The open decision it reserves: whether
+ * plugin tools reach agent Environments, which would need a platform→core injection
+ * seam along the confineSpawn precedent (a getter re-read per Session).
+ */
+export type ToolFactory = unknown;
+
+/**
  * A live shell process: the harness's bottom primitive. The shape is the runtime's
  * ShellProcResource (hmr/resources.ts) — spawned processes are runtime-owned live
  * resources, so they survive a platform swap; everything above (terminal = shell +
@@ -66,6 +74,17 @@ export interface PenguinContext {
   shell: ShellCapability;
   /** Create a terminal — the platform's createTerminal, flattened. */
   createTerminal(command: string, cwd: string): Promise<{ id: string }>;
+  /** The tools currently registered on this App instance (workflow tools today). Live view. */
+  tools(): Array<{ workflowId: string; name: string; description: string }>;
+  /**
+   * Agent invocation — floor 5, RESERVED: the runWorkflowAgent seam turned into a
+   * capability. Not wired yet (a real invocation service must settle task-mutex /
+   * approval / streaming semantics first — see workflow-service.ts); calling it today
+   * rejects, honestly.
+   */
+  agents: {
+    run(projectId: string, agentId: string, prompt: string): Promise<string>;
+  };
   // context.* — further platform members flatten here as concrete needs land.
 }
 
@@ -73,6 +92,8 @@ export interface PenguinContext {
 export interface PenguinInterface {
   /** Workflow factories, keyed by name. */
   workflow: Map<string, WorkflowFactory>;
+  /** Tool factories, keyed by name — floor 4, RESERVED (see {@link ToolFactory}). */
+  tool: Map<string, ToolFactory>;
 }
 
 /** A raw plugin: both hooks optional — a plugin may care about only one side. */

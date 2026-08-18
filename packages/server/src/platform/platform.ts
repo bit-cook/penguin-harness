@@ -104,7 +104,20 @@ export const platformImpl: Impl<PlatformApi, PlatformCtx> = {
       await terminals.add(id, { procId: `proc_${id}`, command, cwd });
       return { id };
     };
-    const pluginIface: PenguinInterface = { workflow: new Map() };
+    const tools = new Map<string, { workflowId: string; tool: WorkflowTool }>();
+    const registry: WorkflowRegistry = {
+      register(workflowId, tool) {
+        const existing = tools.get(tool.name);
+        if (existing !== undefined) {
+          throw new Error(
+            `tool '${tool.name}' is already registered by workflow '${existing.workflowId}'`,
+          );
+        }
+        tools.set(tool.name, { workflowId, tool });
+        return () => tools.delete(tool.name);
+      },
+    };
+    const pluginIface: PenguinInterface = { workflow: new Map(), tool: new Map() };
     pluginHost.createApp(pluginIface);
     pluginHost.emit("create", {
       workflows,
@@ -122,20 +135,20 @@ export const platformImpl: Impl<PlatformApi, PlatformCtx> = {
             opts.cwd,
           ),
       },
-    });
-    const tools = new Map<string, { workflowId: string; tool: WorkflowTool }>();
-    const registry: WorkflowRegistry = {
-      register(workflowId, tool) {
-        const existing = tools.get(tool.name);
-        if (existing !== undefined) {
+      tools: () =>
+        [...tools.values()].map(({ workflowId, tool }) => ({
+          workflowId,
+          name: tool.name,
+          description: tool.description,
+        })),
+      agents: {
+        run: async () => {
           throw new Error(
-            `tool '${tool.name}' is already registered by workflow '${existing.workflowId}'`,
+            "agent invocation is not wired yet: the capability lands with the dedicated agent-invocation service",
           );
-        }
-        tools.set(tool.name, { workflowId, tool });
-        return () => tools.delete(tool.name);
+        },
       },
-    };
+    });
     // `http` rides beside the iface methods (not IN them: a Request/Response pair is not
     // Json) — the seam calls it in-process on the booted object. See ../hmr/http-seam.ts.
     return {

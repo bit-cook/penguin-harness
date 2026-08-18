@@ -29,7 +29,7 @@ describe("plugin host", () => {
     });
     host.use({ subscribe: (eventName) => log.push(`b:${eventName}`) });
 
-    const iface: PenguinInterface = { workflow: new Map() };
+    const iface: PenguinInterface = { workflow: new Map(), tool: new Map() };
     host.createApp(iface);
     const ctx = { workflows: {}, terminals: {} } as unknown as PenguinContext;
     host.emit("create", ctx);
@@ -44,7 +44,7 @@ describe("plugin host", () => {
     const host = new PluginHost();
     host.use({});
     expect(() => {
-      host.createApp({ workflow: new Map() });
+      host.createApp({ workflow: new Map(), tool: new Map() });
       host.emit("create", {} as PenguinContext);
     }).not.toThrow();
   });
@@ -83,6 +83,11 @@ describe("plugin seam on the real platform", () => {
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
       shell.kill();
+
+      // Reserved floors: tool factories on the definition view, agent invocation on
+      // the instance view — placeholders that answer honestly until they land.
+      expect(ctx.tools()).toEqual([]);
+      await expect(ctx.agents.run("p", "a", "hi")).rejects.toThrow(/not wired yet/);
 
       // A second boot (what a hot swap does) is a new App instance: re-delivered.
       const instB = await boot(
