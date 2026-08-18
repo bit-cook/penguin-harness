@@ -1,5 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import zlib from "node:zlib";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { agentStateDir } from "@prismshadow/penguin-core";
 import { buildAppDeps, createApp } from "../src/app.js";
@@ -213,3 +215,90 @@ async function waitUntil(check: () => Promise<boolean>): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 }
+
+describe("workflows across a platform hot swap", () => {
+  let t: TestApp;
+  let api: ReturnType<typeof apiClient>;
+  let cookie: string;
+
+  // A workflow that registers a tool in setup(), so the swap must restore BOTH halves
+  // of the seeding: the tool registration (new create()'s registry starts empty) and
+  // the runCtx binding (the old node's closure died with the old instance).
+  const TOOLED = `
+    let count = context.state?.count ?? 0;
+    return {
+      name: "tooled-counter",
+      version: 1,
+      setup(ctx) {
+        ctx.registerTool({ name: "count_peek", description: "read the count", run: () => count });
+      },
+      async run(input, ctx) {
+        count += input.by ?? 1;
+        return { count, agent: input.prompt ? await ctx.runAgent(input.prompt) : null };
+      },
+      park() { return { count }; }
+    };
+  `;
+
+  beforeEach(async () => {
+    t = await createTestApp({
+      runWorkflowAgent: async (projectId, agentId, prompt) => `${projectId}:${agentId}:${prompt}`,
+    });
+    cookie = (await loginAdmin(t.app)).cookie;
+    api = apiClient(t.app, cookie);
+  });
+  afterEach(async () => t.cleanup());
+
+  it("a push re-seeds active workflows: tools stay registered, runCtx stays bound, state rides", async () => {
+    await api.post("/api/hmr/workflows", payload("count", TOOLED));
+    await t.deps.workflows.activate(PROJECT, AGENT);
+
+    // Pre-swap baseline: tool listed, run works, state at 2.
+    expect(await (await api.get("/api/hmr/workflows")).json()).toMatchObject({
+      workflows: [{ id: "default_agent/count", tools: [{ name: "count_peek" }] }],
+    });
+    expect(
+      await (
+        await api.post("/api/hmr/workflows/default_agent%2Fcount/run", { input: { by: 2 } })
+      ).json(),
+    ).toEqual({ result: { count: 2, agent: null } });
+
+    // The swap: push the workflow-aware next build (same iface version — the routine
+    // "rebuild of today's platform" push).
+    const bundle = await fs.readFile(
+      fileURLToPath(new URL("./fixtures/platform-workflow-next.bundle.mjs", import.meta.url)),
+      "utf8",
+    );
+    const gz = zlib.gzipSync(
+      Buffer.from(
+        JSON.stringify({
+          platform: bundle,
+          cli: "export const cli = async () => 0;\n",
+          web: { files: { "index.html": b64("<html>workflow-next</html>") } },
+        }),
+      ),
+    );
+    const upgraded = await t.app.request("/api/hmr/upgrade", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/gzip" },
+      body: gz,
+    });
+    expect(upgraded.status).toBe(200);
+    expect(((await upgraded.json()) as { status: string }).status).toBe("ok");
+
+    // Post-swap: the workflow node migrated with its state, AND the seeding is back —
+    // the tool is listed and run() continues from the pre-swap count with a live
+    // runAgent binding. Without the post-upgrade reseed this returns no tools and
+    // run() throws "workflow is not activated".
+    expect(await (await api.get("/api/hmr/workflows")).json()).toMatchObject({
+      workflows: [{ id: "default_agent/count", tools: [{ name: "count_peek" }] }],
+    });
+    expect(
+      await (
+        await api.post("/api/hmr/workflows/default_agent%2Fcount/run", {
+          input: { by: 3, prompt: "post-swap" },
+        })
+      ).json(),
+    ).toEqual({ result: { count: 5, agent: `${PROJECT}:${AGENT}:post-swap` } });
+  });
+});

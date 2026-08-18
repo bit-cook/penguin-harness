@@ -166,6 +166,10 @@ export function hmrRoutes(deps: AppDeps): Hono<AppEnv> {
     // Live clients (browser tabs AND the desktop window) reload to pick up the
     // new web assets once a version actually lands.
     if (outcome.status === "ok") {
+      // The swap rebuilt the platform tree: restore the seeding of every active
+      // workflow (tool registrations + runCtx bindings) before answering, so a
+      // client that installs-then-pushes never observes a de-activated window.
+      await deps.workflows.reseedActive();
       deps.channels.broadcast(
         "user:",
         { type: "web_updated", rev: outcome.web.rev },
