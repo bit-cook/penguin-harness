@@ -32,12 +32,40 @@ import type { WorkflowApi } from "./workflow.js";
 /** A workflow factory. Placeholder: the shape lands with the first real factory. */
 export type WorkflowFactory = unknown;
 
+/**
+ * A live shell process: the harness's bottom primitive. The shape is the runtime's
+ * ShellProcResource (hmr/resources.ts) — spawned processes are runtime-owned live
+ * resources, so they survive a platform swap; everything above (terminal = shell +
+ * identity; sandbox = a decorator on how shells SPAWN) builds on this.
+ */
+export interface ShellHandle {
+  /** Full buffered output (stdout+stderr interleaved), capped. */
+  read(): string;
+  write(data: string): void;
+  alive(): boolean;
+  kill(): void;
+}
+
+/** The shell capability: host-provided, plugin-consumed. */
+export interface ShellCapability {
+  spawn(cmd: string, opts: { cwd: string }): ShellHandle;
+}
+
 /** An INSTANCE of the harness: platform members flattened, workflow instances at `workflows`. */
 export interface PenguinContext {
   /** Workflow instances (the platform's keyed workflow nodes). */
   workflows: KeyedHandle<WorkflowApi>;
-  /** Terminals — a platform member, flattened onto the context per the vocabulary. */
+  /**
+   * Terminals — a platform member, flattened onto the context per the vocabulary.
+   * A terminal is a shell plus identity: its process id parks with the tree and is
+   * claimed back from the runtime's resource registry after a swap (or reported
+   * `lost()` when it cannot be).
+   */
   terminals: KeyedHandle<TerminalApi>;
+  /** Spawn a raw shell process (see {@link ShellCapability}). */
+  shell: ShellCapability;
+  /** Create a terminal — the platform's createTerminal, flattened. */
+  createTerminal(command: string, cwd: string): Promise<{ id: string }>;
   // context.* — further platform members flatten here as concrete needs land.
 }
 

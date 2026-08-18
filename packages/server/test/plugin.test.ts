@@ -31,7 +31,7 @@ describe("plugin host", () => {
 
     const iface: PenguinInterface = { workflow: new Map() };
     host.createApp(iface);
-    const ctx = { workflows: {}, terminals: {} } as PenguinContext;
+    const ctx = { workflows: {}, terminals: {} } as unknown as PenguinContext;
     host.emit("create", ctx);
 
     expect(log).toEqual(["a:create-app", "a:create", "b:create"]);
@@ -73,6 +73,16 @@ describe("plugin seam on the real platform", () => {
       const ctx = events[0]!.ctx;
       expect(typeof ctx.terminals.keys).toBe("function");
       expect(typeof ctx.workflows.keys).toBe("function");
+      expect(typeof ctx.createTerminal).toBe("function");
+
+      // The shell primitive: a live, runtime-owned process a plugin can drive.
+      const shell = ctx.shell.spawn("echo plugin-shell-ok", { cwd: process.cwd() });
+      const until = Date.now() + 5000;
+      while (!shell.read().includes("plugin-shell-ok")) {
+        if (Date.now() > until) throw new Error(`shell output never arrived: ${shell.read()}`);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      shell.kill();
 
       // A second boot (what a hot swap does) is a new App instance: re-delivered.
       const instB = await boot(

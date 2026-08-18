@@ -96,9 +96,33 @@ export const platformImpl: Impl<PlatformApi, PlatformCtx> = {
     // hot-swap boot alike — hands plugins the definition view first, then the live
     // instance context ("create" event). Members stay minimal by instruction; they
     // grow only when a concrete need (sandbox first) names them.
+    const createTerminal = async (command: string, cwd: string): Promise<{ id: string }> => {
+      const id = `term_${Math.random().toString(36).slice(2, 10)}`;
+      // Spawn the live resource on the runtime side first; the node only
+      // carries its handle id (linear state).
+      spawnShellResource(ctx.resources, `proc_${id}`, command, cwd);
+      await terminals.add(id, { procId: `proc_${id}`, command, cwd });
+      return { id };
+    };
     const pluginIface: PenguinInterface = { workflow: new Map() };
     pluginHost.createApp(pluginIface);
-    pluginHost.emit("create", { workflows, terminals });
+    pluginHost.emit("create", {
+      workflows,
+      terminals,
+      createTerminal,
+      shell: {
+        // A raw shell is the same runtime-owned live resource a terminal wraps —
+        // minus the identity node. It survives swaps in the Resources registry and
+        // is killed by the process-exit sweep like every other shell proc.
+        spawn: (cmd, opts) =>
+          spawnShellResource(
+            ctx.resources,
+            `shell_${Math.random().toString(36).slice(2, 10)}`,
+            cmd,
+            opts.cwd,
+          ),
+      },
+    });
     const tools = new Map<string, { workflowId: string; tool: WorkflowTool }>();
     const registry: WorkflowRegistry = {
       register(workflowId, tool) {
@@ -125,14 +149,7 @@ export const platformImpl: Impl<PlatformApi, PlatformCtx> = {
         terminals: terminals.keys(),
         workflows: workflows.keys(),
       }),
-      async createTerminal(command, cwd) {
-        const id = `term_${Math.random().toString(36).slice(2, 10)}`;
-        // Spawn the live resource on the runtime side first; the node only
-        // carries its handle id (linear state).
-        spawnShellResource(ctx.resources, `proc_${id}`, command, cwd);
-        await terminals.add(id, { procId: `proc_${id}`, command, cwd });
-        return { id };
-      },
+      createTerminal,
       terminals: () => terminals,
       workflows: () => workflows,
       workflowTools: () =>
