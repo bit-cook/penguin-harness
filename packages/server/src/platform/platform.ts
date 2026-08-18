@@ -36,6 +36,8 @@ import { MachinesService } from "./machines/service.js";
 import type { TerminalApi } from "./terminal.js";
 import { TerminalIface, terminalImpl } from "./terminal.js";
 import { spawnShellResource } from "../hmr/resources.js";
+import type { PenguinInterface } from "./plugin.js";
+import { pluginHost } from "./plugin.js";
 import type { WorkflowApi, WorkflowRegistry, WorkflowTool } from "./workflow.js";
 import { WorkflowIface, workflowImpl } from "./workflow.js";
 
@@ -90,6 +92,13 @@ export const platformImpl: Impl<PlatformApi, PlatformCtx> = {
     const serverProxy = machinesProxy((id) => machines.tunnelPortFor(id));
     const terminals = children.terminals as KeyedHandle<TerminalApi>;
     const workflows = children.workflows as KeyedHandle<WorkflowApi>;
+    // The plugin seam (see ./plugin.ts): every App creation — packaged boot and each
+    // hot-swap boot alike — hands plugins the definition view first, then the live
+    // instance context ("create" event). Members stay minimal by instruction; they
+    // grow only when a concrete need (sandbox first) names them.
+    const pluginIface: PenguinInterface = { workflow: new Map() };
+    pluginHost.createApp(pluginIface);
+    pluginHost.emit("create", { workflows, terminals });
     const tools = new Map<string, { workflowId: string; tool: WorkflowTool }>();
     const registry: WorkflowRegistry = {
       register(workflowId, tool) {
