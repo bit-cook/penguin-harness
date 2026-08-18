@@ -61,6 +61,7 @@ import type { CompactionSettings } from "./engine/context-engine.js";
 import type {
   GenerativeModelConfig,
   ProxyEnvPolicy,
+  SpawnConfiner,
   SubagentRunner,
   ThinkingLevelName,
   ToolDefinition,
@@ -90,6 +91,14 @@ export interface CreateAgentOptions {
    * user's own shell environment).
    */
   proxyEnv?: () => ProxyEnvPolicy | null;
+  /**
+   * Sandbox-confinement seam for the command subprocesses of every Session this Agent
+   * creates or resumes — and of its subagents' Sessions, which inherit the getter (see
+   * {@link SpawnConfiner}). Host policy exactly like `proxyEnv`: re-read at every
+   * spawn, so the hosting server can swap the active confiner without restarting
+   * Sessions. Absent = commands spawn unconfined.
+   */
+  confineSpawn?: () => SpawnConfiner | null;
 }
 
 export interface CreateSessionOptions {
@@ -153,7 +162,7 @@ export function metaMaxTokens(budget: number, modelCap: number | undefined): num
 export async function createAgent(opts: CreateAgentOptions = {}): Promise<Agent> {
   const state = await loadOrInitAgentState(opts);
   const projectConfig = await loadProjectConfig(state.root, state.projectId);
-  return new Agent(state, projectConfig, opts.proxyEnv);
+  return new Agent(state, projectConfig, opts.proxyEnv, opts.confineSpawn);
 }
 
 export class Agent {
@@ -162,6 +171,8 @@ export class Agent {
     readonly projectConfig: ProjectConfig,
     /** See {@link CreateAgentOptions.proxyEnv}; forwarded into every Session's Environment. */
     private readonly proxyEnv?: () => ProxyEnvPolicy | null,
+    /** See {@link CreateAgentOptions.confineSpawn}; forwarded into every Session's Environment. */
+    private readonly confineSpawn?: () => SpawnConfiner | null,
   ) {}
 
   /**
@@ -632,10 +643,12 @@ export class Agent {
                 root,
                 projectId,
                 agentId,
-                // A child Agent loads its own vault/config, but the proxy-env policy
-                // getter is host policy, not Agent state: the subagent's commands run in
-                // the same serving process, so they follow the same settings as the parent's.
+                // A child Agent loads its own vault/config, but the proxy-env policy and
+                // spawn-confinement getters are host policy, not Agent state: the subagent's
+                // commands run in the same serving process, so they follow the same
+                // settings as the parent's.
                 ...(parentAgent.proxyEnv ? { proxyEnv: parentAgent.proxyEnv } : {}),
+                ...(parentAgent.confineSpawn ? { confineSpawn: parentAgent.confineSpawn } : {}),
               })
             : parentAgent;
         // The child Session follows the PARENT Session, never the Project default: with the
@@ -786,6 +799,7 @@ export class Agent {
       services: { subagentRunner, ...(visionDescriber ? { visionDescriber } : {}) },
       ...(Object.keys(vault).length > 0 ? { vault } : {}),
       ...(this.proxyEnv ? { proxyEnv: this.proxyEnv } : {}),
+      ...(this.confineSpawn ? { confineSpawn: this.confineSpawn } : {}),
     });
 
     // Configured output cap: the entry's per-model annotation wins over the Agent's
